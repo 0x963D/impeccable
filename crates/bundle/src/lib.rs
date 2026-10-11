@@ -49,6 +49,7 @@ macro_rules! page_js {
 
 page_js![
     "00-header.js",
+    "05-natives.js",
     "10-probe.js",
     "15-snapshot.js",
     "30-scan-common.js",
@@ -77,6 +78,7 @@ fn src(name: &str) -> Cow<'static, str> {
 /// `@@WASM@@` the embedded module + synchronous instantiation.
 const ORDER: &[&str] = &[
     "00-header.js",
+    "05-natives.js",
     "10-probe.js",
     "15-snapshot.js",
     "@@GLUE@@",
@@ -93,7 +95,7 @@ const ORDER: &[&str] = &[
 /// (the module ships beside it as `core_bg.wasm`; no base64: the offscreen
 /// document fetches it) + the scan plumbing and visual-contrast orchestration
 /// + the offscreen session protocol.
-const EXT_SNAPSHOT: &[&str] = &["15-snapshot.js"];
+const EXT_SNAPSHOT: &[&str] = &["05-natives.js", "15-snapshot.js"];
 const EXT_OVERLAY: &[&str] = &["40-overlay.js"];
 const EXT_CORE: &[&str] = &["@@GLUE@@", "@@LOADER@@", "30-scan-common.js", "35-visual.js", "60-offscreen.js"];
 

@@ -720,6 +720,10 @@ impl<'a> Page<'a> {
             self.handle_frame_tree(ft, None);
         }
         self.send("Page.setLifecycleEventsEnabled", json!({ "enabled": true }))?;
+        // Before any page script on every document this page loads: keep the
+        // built-ins the snapshot producer uses where page script cannot
+        // replace them (`natives_prelude_script`).
+        self.send("Page.addScriptToEvaluateOnNewDocument", json!({ "source": natives_prelude_script() }))?;
         // URL mode injects only the snapshot producer (plain JS) and runs the
         // rules natively in this process over `SnapshotDom` (triage D2; see
         // WASM-BUNDLE.md in the detector repo): no WebAssembly is compiled next
@@ -2230,6 +2234,23 @@ mod tests {
         assert_eq!(with.last().unwrap(), "--no-sandbox");
         assert!(with.contains(&"about:blank".to_string()));
     }
+}
+
+/// `browser-bundle/05-natives.js`: binds the built-ins the page JS uses
+/// (`Map`, `Set`, `Array.from`, `JSON.stringify`, ...) from
+/// `window.__impeccableNatives` when that stash exists, else from the
+/// current globals.
+pub const NATIVES_JS: &str = include_str!("../../../browser-bundle/05-natives.js");
+
+/// The new-document script [`Page`] registers for every document, which runs
+/// before the page's own scripts: it builds the natives from the untouched
+/// globals and stashes them on `window.__impeccableNatives`, non-enumerable
+/// and read-only, so a page that declares its own global `Map` (work24.go.kr)
+/// or reassigns `Array.from` cannot reach the capture.
+pub fn natives_prelude_script() -> String {
+    format!(
+        "(function(){{\n{NATIVES_JS}\ntry {{ Reflect.defineProperty(window, '__impeccableNatives', {{ value: __impeccableNatives, enumerable: false, writable: false, configurable: false }}); }} catch (e) {{}}\n}})()"
+    )
 }
 
 /// The page-side half of [`Page::pin_clock`].
