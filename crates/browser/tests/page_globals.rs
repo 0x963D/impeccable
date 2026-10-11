@@ -175,6 +175,12 @@ fn capture(browser: &mut Browser, port: u16) -> (Value, Value) {
             "window.__impIO.loadImage(document.querySelector('img').src).then(r => r && { w: r.w, h: r.h })",
         )
         .expect("visual IO");
+    // The engine's own scripts (the CLI's asset capture reads resource
+    // timings) still reach every Performance method through the stash.
+    let entries = page
+        .evaluate_value("performance.getEntriesByType('navigation').length")
+        .expect("performance entries");
+    assert_eq!(entries, serde_json::json!(1));
     page.close();
     (serde_json::from_str(&json).expect("capture json"), image)
 }

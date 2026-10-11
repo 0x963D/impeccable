@@ -71,9 +71,9 @@ function __impeccableBuildNatives(g) {
     const fn = g[name];
     return typeof fn === 'function' ? R.apply(g.Function.prototype.bind, fn, [g]) : undefined;
   };
-  const perf = g.performance;
   return freeze({
-    // Constructors used for `new` or calls only: the natives themselves.
+    // Constructors used for `new` or calls only, and objects whose methods
+    // live on their prototype: the natives themselves.
     Map: g.Map, Set: g.Set, WeakMap: g.WeakMap, WeakSet: g.WeakSet,
     Error: g.Error, URL: g.URL, Image: g.Image, ResizeObserver: g.ResizeObserver,
     String: g.String, Boolean: g.Boolean,
@@ -83,9 +83,9 @@ function __impeccableBuildNatives(g) {
     // Namespaces.
     JSON: namespace(g.JSON), Math: namespace(g.Math), Reflect: namespace(g.Reflect),
     CSS: namespace(g.CSS),
-    performance: perf && typeof perf.now === 'function'
-      ? freeze({ now: R.apply(g.Function.prototype.bind, perf.now, [perf]) })
-      : perf,
+    // The page's own Performance object: its methods (`now`,
+    // `getEntriesByType`, ...) live on its prototype, like Map's.
+    performance: g.performance,
     // Window functions.
     getComputedStyle: bound('getComputedStyle'), matchMedia: bound('matchMedia'),
     setTimeout: bound('setTimeout'), clearTimeout: bound('clearTimeout'),
