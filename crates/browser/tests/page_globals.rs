@@ -9,12 +9,11 @@
 //!
 //! - The capture test replaces or breaks every built-in the snapshot producer
 //!   (`browser-bundle/05-natives.js` + `15-snapshot.js`) reaches for.
-//! - The scan test runs the whole URL engine over the realistic class: the
-//!   site's own constructors (`Map`, `Set`, ...) and statics reassigned on
-//!   the shared objects (`Array.from`, `JSON.stringify`, ...), the way legacy
-//!   libraries do. The engine's other page scripts (the scroll probe, the
-//!   full-page screenshot) still read the page's `Math` and `setTimeout`; a
-//!   page that replaces those is outside what this fix covers.
+//! - The scan test runs the whole URL engine, whose own page scripts (the
+//!   visual pass's scroll-into-view, the scroll probe, consent and overlay
+//!   handling) build Maps and Sets too, over two scripts: the class legacy
+//!   sites ship (their own collection constructors, statics reassigned on
+//!   the shared objects) and the full replacement set above.
 //!
 //! Skips cleanly when no browser is installed.
 
@@ -31,7 +30,10 @@ use serde_json::Value;
 
 /// Exercises every part of the capture: a linked stylesheet (with a media
 /// rule, a supports rule and keyframes), recorded states, a running
-/// animation, a shadow tree, a placeholder and an image.
+/// animation, a shadow tree, a placeholder and an image. The faint text on a
+/// gradient below the first viewport sends the scan's visual-contrast pass
+/// through its scroll-into-view script, which keeps a `Map` of the scroll
+/// offsets it moved.
 const PAGE: &str = r#"<!doctype html><html><head>
 <meta charset="utf-8">
 <title>Globals</title>
@@ -49,6 +51,7 @@ const PAGE: &str = r#"<!doctype html><html><head>
   <div class="pulse">New</div>
   <img alt="" width="40" height="40" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23345'/%3E%3C/svg%3E">
   <div id="host"></div>
+  <section class="band"><p class="faint">Office hours and holiday closures</p></section>
 </main>
 <script>
   document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<button disabled>Inside</button>';
@@ -62,6 +65,8 @@ const CSS: &str = r#"body { font-family: Georgia, serif; margin: 0; color: #222;
 @supports (display: grid) { main { display: grid; gap: 12px; padding: 24px; } }
 @keyframes pulse { from { opacity: 0.4; } to { opacity: 1; } }
 .pulse { animation: pulse 600s steps(1, end) infinite; width: 60px; }
+.band { margin-top: 1400px; padding: 24px; background: linear-gradient(90deg, #6d6d6d, #7a7a7a); }
+.faint { color: #5f5f5f; font-size: 16px; }
 "#;
 
 /// What work24.go.kr does (a global `Map` constructor with its own API), and
@@ -205,6 +210,7 @@ fn page_replaced_builtins_do_not_change_the_scan() {
         return;
     }
     let legacy = serve(LEGACY);
+    let hostile = serve(HOSTILE);
     let benign = serve(BENIGN);
     let scan = |port: u16| {
         let engine = BrowserEngine::new(env.clone());
@@ -224,8 +230,15 @@ fn page_replaced_builtins_do_not_change_the_scan() {
         let ids: Vec<String> = findings.iter().map(|f| format!("{}|{}", f.antipattern, f.snippet)).collect();
         (ids, evidence.scan_snapshot.is_some())
     };
-    let (legacy_findings, legacy_captured) = scan(legacy);
     let (benign_findings, benign_captured) = scan(benign);
-    assert!(benign_captured && legacy_captured);
-    assert_eq!(legacy_findings, benign_findings);
+    assert!(benign_captured);
+    assert!(
+        benign_findings.iter().any(|f| f.starts_with("low-contrast|")),
+        "the faint band reaches the visual pass: {benign_findings:?}"
+    );
+    for (name, port) in [("legacy", legacy), ("hostile", hostile)] {
+        let (findings, captured) = scan(port);
+        assert!(captured, "{name}");
+        assert_eq!(findings, benign_findings, "{name}");
+    }
 }
