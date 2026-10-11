@@ -2269,7 +2269,7 @@ pub const NATIVE_NAMES: &[&str] = &[
     "Map", "Set", "WeakMap", "WeakSet", "Error", "URL", "Image", "ResizeObserver", "String",
     "Boolean", "Array", "Object", "Number", "Promise", "JSON", "Math", "Reflect", "CSS",
     "performance", "getComputedStyle", "matchMedia", "setTimeout", "clearTimeout",
-    "requestAnimationFrame",
+    "requestAnimationFrame", "parseFloat",
 ];
 
 /// `expression` inside a block whose `const`s shadow the built-ins with the

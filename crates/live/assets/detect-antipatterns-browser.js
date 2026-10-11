@@ -55,6 +55,10 @@ function __impeccableBuildNatives(g) {
   const O = g.Object;
   const R = g.Reflect;
   const freeze = O.freeze;
+  // Held now, so a page that later replaces `Reflect.construct` or
+  // `Reflect.apply` on the shared object cannot reach the facades below.
+  const construct = R.construct;
+  const apply = R.apply;
   // Own properties of `owner`, functions bound to it (`Array.from` and
   // `Promise.resolve` read `this`), onto `target`.
   const copyStatics = (owner, target) => {
@@ -76,7 +80,7 @@ function __impeccableBuildNatives(g) {
   const callable = (native) => {
     if (typeof native !== 'function') return native;
     const facade = function (...args) {
-      return new.target ? R.construct(native, args) : R.apply(native, undefined, args);
+      return new.target ? construct(native, args) : apply(native, undefined, args);
     };
     O.defineProperty(facade, 'prototype', { value: native.prototype, writable: false });
     return freeze(copyStatics(native, facade));
@@ -104,6 +108,8 @@ function __impeccableBuildNatives(g) {
     getComputedStyle: bound('getComputedStyle'), matchMedia: bound('matchMedia'),
     setTimeout: bound('setTimeout'), clearTimeout: bound('clearTimeout'),
     requestAnimationFrame: bound('requestAnimationFrame'),
+    // Global functions that do not read `this`.
+    parseFloat: g.parseFloat,
   });
 }
 
@@ -122,7 +128,7 @@ const __impeccableNatives = (() => {
     Reflect: g.Reflect, CSS: g.CSS, performance: g.performance,
     getComputedStyle: g.getComputedStyle, matchMedia: g.matchMedia,
     setTimeout: g.setTimeout, clearTimeout: g.clearTimeout,
-    requestAnimationFrame: g.requestAnimationFrame,
+    requestAnimationFrame: g.requestAnimationFrame, parseFloat: g.parseFloat,
   };
 })();
 
@@ -130,6 +136,7 @@ const {
   Map, Set, WeakMap, WeakSet, Error, URL, Image, ResizeObserver, String, Boolean,
   Array, Object, Number, Promise, JSON, Math, Reflect, CSS, performance,
   getComputedStyle, matchMedia, setTimeout, clearTimeout, requestAnimationFrame,
+  parseFloat,
 } = __impeccableNatives;
 // --- browser-bundle/10-probe.js ---
 // The DOM probe the WASM rule core calls back into. Pure measurement: one

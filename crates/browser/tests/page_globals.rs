@@ -94,6 +94,9 @@ var matchMedia = function () { return { matches: false }; };
 var setTimeout = function () { return 0; };
 var clearTimeout = function () {};
 var requestAnimationFrame = function () { return 0; };
+var parseFloat = function () { return 0; };
+Reflect.construct = function () { throw new Error('page Reflect.construct'); };
+Reflect.apply = function () { throw new Error('page Reflect.apply'); };
 Array.from = function () { return []; };
 Array.isArray = function () { return false; };
 Object.keys = function () { return []; };
@@ -157,9 +160,8 @@ fn browser() -> Option<Browser> {
         eprintln!("skip: no installed browser found");
         return None;
     };
-    Browser::launch(&exe, &[], false)
-        .map_err(|e| eprintln!("skip: could not launch browser: {}", e.message))
-        .ok()
+    // A browser that is installed but will not start is a failure, not a skip.
+    Some(Browser::launch(&exe, &[], false).unwrap_or_else(|e| panic!("launch: {}", e.message)))
 }
 
 /// Load the page from `port`, capture it, and hand back the capture's JSON
@@ -181,6 +183,14 @@ fn capture(browser: &mut Browser, port: u16) -> (Value, Value) {
         .evaluate_value("performance.getEntriesByType('navigation').length")
         .expect("performance entries");
     assert_eq!(entries, serde_json::json!(1));
+    // The global functions and the constructor facades the engine's own
+    // scripts reach (the scroll probe's and the validity probe's opacity
+    // reads, `new Array(n)`), even with the page's `parseFloat`,
+    // `Reflect.construct` and `Reflect.apply` replaced.
+    let scoped = page
+        .evaluate_value("[parseFloat('0.5'), new Array(3).length, Number('7'), Array.from('ab').length]")
+        .expect("scoped natives");
+    assert_eq!(scoped, serde_json::json!([0.5, 3, 7, 2]));
     page.close();
     (serde_json::from_str(&json).expect("capture json"), image)
 }
