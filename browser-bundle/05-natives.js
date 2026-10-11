@@ -8,14 +8,28 @@
 // The URL engine runs this file once more, as a script on every new document
 // before any page script (`Page::initialize` in crates/browser), and that run
 // stashes what it built on `window.__impeccableNatives`, read-only and
-// non-enumerable. Later runs take the stash. Without one (the live script tag,
-// the extension's content script) the current globals are used as they are:
-// the extension already runs in its own world, and live mode sees the user's
+// non-enumerable. Later runs take the stash. Without one (the live script
+// tag) the current globals are used as they are: live mode sees the user's
 // own app.
 //
+// The extension does not ship this file: its content scripts already have
+// their own globals, and in Firefox `window` there is an Xray view of the
+// page's window, so natives built from it throw (crates/bundle EXT_SNAPSHOT).
+// The builder reads `globalThis`, never `window`, for the same reason: in the
+// page's own world the two are one object.
+//
+// `performance` is the page's own Performance object, shared with the page:
+// a page that replaces the global is covered, one that assigns
+// `performance.now` or patches `Performance.prototype` is not.
+//
+// The stash is page-visible: `Object.getOwnPropertyNames(window)` lists
+// `__impeccableNatives` on every document the URL engine loads, and a page
+// that declares its own global `let __impeccableNatives` fails to load that
+// script. Both are vanishingly rare.
+//
 // The `const` at the end shadows the globals for everything after it in the
-// same function scope, which every consumer of these files provides (the
-// in-page bundle's IIFE, the extension pieces, the URL engine's wrapper).
+// same function scope, which every consumer of this file provides (the
+// in-page bundle's IIFE, the URL engine's wrapper and prelude).
 // Statics (`Array.from`, `JSON.stringify`, `Object.keys`, ...) are copied at
 // capture time, so a later assignment to the shared object reaches nothing
 // here. Prototype methods (`Map.prototype.set`) are not copied: a page that
@@ -81,7 +95,7 @@ function __impeccableBuildNatives(g) {
 }
 
 const __impeccableNatives = (() => {
-  const g = typeof window !== 'undefined' ? window : globalThis;
+  const g = globalThis;
   try {
     const stash = g.__impeccableNatives;
     if (stash && typeof stash === 'object') return stash;
