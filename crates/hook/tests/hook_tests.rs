@@ -2354,7 +2354,7 @@ fn admin_on_repairs_project_manifest_from_user_scope_claude_skill() {
         "impeccable",
     ]);
     assert!(
-        command.contains(&expected_launcher),
+        command.replace('\\', "/").contains(&expected_launcher.replace('\\', "/")),
         "user-scope launcher missing from repaired command: {command}"
     );
     assert!(!command.contains("CLAUDE_PROJECT_DIR"), "{command}");
@@ -2393,7 +2393,7 @@ fn admin_on_repairs_shared_project_manifest_from_user_scope_claude_skill() {
         "impeccable",
     ]);
     assert!(
-        command.contains(&expected_launcher),
+        command.replace('\\', "/").contains(&expected_launcher.replace('\\', "/")),
         "user-scope launcher missing from repaired shared command: {command}"
     );
     assert!(!command.contains("CLAUDE_PROJECT_DIR"), "{command}");
