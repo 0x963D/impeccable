@@ -221,6 +221,7 @@ const cases = [
   { id: 'context-visual-only', verb: 'context', workspace: 'ctx-visual-only', env: env(), files: IMPECCABLE_FILES },
   { id: 'context-product-only', verb: 'context', workspace: 'ctx-product-only', env: env(), files: IMPECCABLE_FILES },
   { id: 'context-full', verb: 'context', workspace: 'ctx-full', setup: sidecarNewer, env: env(), files: IMPECCABLE_FILES },
+  { id: 'context-full-oversized-design', verb: 'context', workspace: 'ctx-full', setup: (ws) => { write(ws, 'DESIGN.md', '# Design System: Oversized\n\n' + 'A deliberately long paragraph that pads DESIGN.md past the output budget.\n\n'.repeat(300)); sidecarNewer(ws); }, env: env(), files: IMPECCABLE_FILES },
   { id: 'context-full-target-brief', verb: 'context', workspace: 'ctx-full', setup: sidecarNewer, args: ['--target', 'src/pages/index.astro'], env: env(), files: IMPECCABLE_FILES },
   { id: 'context-full-target-related', verb: 'context', workspace: 'ctx-full', setup: sidecarNewer, args: ['-t', 'src/components/Hero.astro'], env: env(), files: IMPECCABLE_FILES },
   { id: 'context-full-target-route', verb: 'context', workspace: 'ctx-full', setup: sidecarNewer, args: ['--target=/pricing'], env: env(), files: IMPECCABLE_FILES },
