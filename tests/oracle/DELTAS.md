@@ -7030,3 +7030,7 @@ Re-recorded from the binary and reviewed by hand, 28 goldens, one or two lines e
 
 Review round, same day, 19 goldens re-recorded. The surface roll body (`PROMOTED_SURFACE`) asks for each card's HTML sketch with the wireframe as the fallback, where it still asked for the wireframe outright; the sketch line names `htmlFrame` for phone and native surfaces; `question-schema` documents `htmlFrame`. A hand now records `startedAt` (normalized to `<EPOCH>`) and, when the round declares any, `sketches`, which moves `question-update-comps-next`'s hand file by that one key.
 
+
+## Recorded 2026-10-12: detect honors a configured extension's engine (#795)
+
+`detect` dropped the `engine` of a `detector.extensions` entry and routed by `.html`/`.htm` alone, so a template declared `{"ext": ".html.erb", "engine": "html"}` went to the text engine in `detect` and to the static HTML engine in the hook. Both now route through one predicate: a configured entry picks the engine (a bare string means `html`), otherwise `.html`/`.htm`. Built-in `.vue`, `.svelte`, `.astro` and `.blade.php` are unchanged. Re-recorded from the binary and reviewed by hand: in `detect-config-extensions-dir-json` the configured `first.html.erb` now reports exactly what `plain.html` (the same bytes) reports, one `broken-image` at line 0; it loses the text engine's `overused-font` and line-1 `broken-image`. New case `detect-config-extensions-file-json` scans that file directly and reports the same finding. `detect-config-extensions-dir-no-config` did not move.
