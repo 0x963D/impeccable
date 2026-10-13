@@ -1632,8 +1632,9 @@ fn keyframes_hold_x(dom: &dyn Dom, el: ElId, p: &str) -> bool {
 
 /// Whether a box above `el` carries a move on y into x: a `transform` whose
 /// matrix maps y into x (a rotation, a `skewX`; any scale, even unequal on
-/// the two axes, does not), one the engine cannot read, or a `rotate` other
-/// than none or 0. Under one, a move on y, or a scale of y, is a move
+/// the two axes, does not), a 3D one that is not a flat 2D matrix (a
+/// `perspective()` projects a move on y sideways), one the engine cannot
+/// read, a `rotate` other than none or 0, or a `perspective` property. Under one, a move on y, or a scale of y, is a move
 /// sideways on screen.
 fn ancestor_turns(dom: &dyn Dom, el: ElId) -> bool {
     const MAX_ANCESTORS: usize = 64;
@@ -1644,9 +1645,16 @@ fn ancestor_turns(dom: &dyn Dom, el: ElId) -> bool {
             return false;
         }
         let t = js::trim(&dom.style(c, "transform")).replace(' ', "");
+        // A 3D matrix counts only as the 2D one it may be: nothing in or
+        // out of z and no perspective row, which projects a move on y
+        // sideways too.
         let parts: Option<Vec<f64>> = if let Some(body) = t.strip_prefix("matrix3d(").and_then(|b| b.strip_suffix(')')) {
             let v: Vec<f64> = body.split(',').map(js::parse_float).collect();
-            (v.len() == 16).then(|| vec![v[0], v[1], v[4], v[5]])
+            let flat = v.len() == 16
+                && [2, 3, 6, 7, 8, 9, 11, 14].iter().all(|&i| v[i] == 0.0)
+                && v[10] == 1.0
+                && v[15] == 1.0;
+            flat.then(|| vec![v[0], v[1], v[4], v[5]])
         } else if let Some(body) = t.strip_prefix("matrix(").and_then(|b| b.strip_suffix(')')) {
             let v: Vec<f64> = body.split(',').map(js::parse_float).collect();
             (v.len() == 6).then(|| v[..4].to_vec())
@@ -1661,7 +1669,9 @@ fn ancestor_turns(dom: &dyn Dom, el: ElId) -> bool {
         let unrotated = rotate.is_empty()
             || rotate == "none"
             || rotate.split_whitespace().last().is_some_and(|a| js::parse_float(a) == 0.0);
-        if !keeps_directions || !unrotated {
+        let perspective = js::trim(&dom.style(c, "perspective")).to_string();
+        let flat_view = perspective.is_empty() || perspective == "none";
+        if !keeps_directions || !unrotated || !flat_view {
             return true;
         }
         cur = dom.parent(c);

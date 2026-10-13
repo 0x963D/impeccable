@@ -4513,6 +4513,11 @@ mod tests {
         // A wrapper that only scales, even unequally, carries no move on y
         // into x (review): the overflow stays.
         assert_eq!(run_t(Some(vec!["transform"]), &tall_skewed, false, "matrix(2, 0, 0, 1, 0, 0)"), 1);
+        // Under a perspective tilt (`perspective(500px) rotateX(30deg)`), a
+        // move on y shifts the text sideways on screen too (review).
+        let tilted = "matrix3d(1, 0, 0, 0, 0, 0.866025, 0.5, -0.001, 0, -0.5, 0.866025, -0.00173205, 0, 0, 0, 1)";
+        assert_eq!(run_t(Some(vec!["transform"]), &tall_skewed, false, tilted), 0);
+        assert_eq!(run_t(Some(vec!["transform"]), &tall_skewed, false, "matrix3d(2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)"), 1);
         // A transform moved by script (a Web Animations loop) with no CSS
         // animation or transition to trace it is unknown.
         let untraced = [("transform", "matrix(1, 0, 0, 1, -40, 0)")];
