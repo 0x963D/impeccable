@@ -815,7 +815,13 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                                 || (text_len <= TRACKED_LABEL_MAX_CHARS && is_capitalized_run(&own))));
                     // CJK text takes open tracking by convention, as the
                     // browser engine and extreme-negative-tracking read it.
-                    let cjk = impeccable_core::checks::text_rules::is_cjk_text(&own);
+                    // The script is read from the element's own text, not a
+                    // child's; text with no letters of its own is read whole.
+                    let cjk = {
+                        let direct = collapse_ws(js::trim(&el.direct_text()));
+                        let sample = if direct.chars().any(char::is_alphabetic) { &direct } else { &own };
+                        impeccable_core::checks::text_rules::is_cjk_text(sample)
+                    };
                     if !caps_label && !cjk {
                         findings.push(RuleHit::new(
                             "wide-tracking",

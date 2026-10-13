@@ -96,6 +96,14 @@ fn typed_capitals_past_label_length_take_the_uppercase_exemption() {
         ),
         1
     );
+    // An English line that carries a longer Japanese translation in a
+    // hidden child is read by its own text (review): still running text.
+    assert_eq!(
+        tracking_hits(
+            r#"<p class="run" style="letter-spacing: 0.12em"><span hidden>サポートの受付時間は月曜日から金曜日の午前九時から午後六時までとなっております。祝日と年末年始は休業日となりますのでご了承ください</span>Support hours run Monday to Friday, from nine until six</p>"#
+        ),
+        1
+    );
 }
 
 #[test]

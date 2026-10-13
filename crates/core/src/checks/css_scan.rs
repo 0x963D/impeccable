@@ -2109,8 +2109,10 @@ fn path_is_rounded_rectangle(body: &str) -> bool {
     // Path data holds no parentheses: the body ends at the first one. An
     // inline style escapes the quotes, and a fill rule may lead.
     let data = body.split(')').next().unwrap_or("").replace("&quot;", "\"");
-    let data = match data.rfind(',') {
-        Some(i) if data[..i].trim().trim_matches(|c| c == '"' || c == '\'').chars().all(|c| c.is_ascii_alphabetic()) => {
+    // The fill rule, where one leads, is a keyword before the first comma;
+    // the path data after it holds commas of its own.
+    let data = match data.find(',') {
+        Some(i) if matches!(data[..i].trim().to_ascii_lowercase().as_str(), "nonzero" | "evenodd") => {
             data[i + 1..].to_string()
         }
         _ => data,
@@ -3077,6 +3079,11 @@ mod tests {
         let wide = squircle.replace("110.003", "120.816").replace("135.203", "146.016");
         assert!(path_is_rounded_rectangle(&format!("'{wide}')")));
         assert!(path_is_rounded_rectangle("evenodd, 'M10 0H90Q100 0 100 10V90Q100 100 90 100H10Q0 100 0 90V10Q0 0 10 0Z')"));
+        // A fill rule ahead of path data that holds commas of its own
+        // (review), and a comma right after the first command.
+        assert!(path_is_rounded_rectangle("evenodd, 'M10,0 H90 Q100,0 100,10 V90 Q100,100 90,100 H10 Q0,100 0,90 V10 Q0,0 10,0 Z')"));
+        assert!(path_is_rounded_rectangle("nonzero, 'M,10 0H90Q100 0 100 10V90Q100 100 90 100H10Q0 100 0 90V10Q0 0 10 0Z')"));
+        assert!(path_is_rounded_rectangle("'M10,0 H90 Q100,0 100,10 V90 Q100,100 90,100 H10 Q0,100 0,90 V10 Q0,0 10,0 Z')"));
         // A blob of curves, and a curved shape with one flat side, still report.
         let blob = ".b{clip-path:path('M50 0 C80 0 100 20 100 50 C100 80 80 100 50 100 C20 100 0 80 0 50 C0 20 20 0 50 0 Z')}";
         assert_eq!(scan_css_text_for_organic_clip_path(blob).len(), 1);

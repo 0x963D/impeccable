@@ -2203,8 +2203,19 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     // Han, kana and Hangul sit in square cells and are set
                     // with open tracking by convention, as the crushed
                     // tracking check below already reads them
-                    // (weathernews.jp's FAQ titles at 0.10em).
-                    let cjk = is_cjk_text(&collapse_ws(js::trim(&dom.text_content(el))));
+                    // (weathernews.jp's FAQ titles at 0.10em). The script
+                    // is read from the element's own text, not a child's
+                    // (an English line with a hidden Japanese translation
+                    // keeps its finding); only text with no letters of its
+                    // own is read from the whole run.
+                    let cjk = {
+                        let own = collapse_ws(js::trim(&direct_text(dom, el)));
+                        if own.chars().any(char::is_alphabetic) {
+                            is_cjk_text(&own)
+                        } else {
+                            is_cjk_text(&collapse_ws(js::trim(&dom.text_content(el))))
+                        }
+                    };
                     if !caps_label && !control_label && !cjk {
                         findings.push(RuleHit::new(
                             "wide-tracking",
@@ -5039,6 +5050,14 @@ mod tests {
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
         assert_eq!(hits[0].snippet, "letter-spacing: 0.13em on body text");
+        // A longer Japanese translation in a hidden child does not make the
+        // English line CJK text (review): the script is read from its own.
+        let hidden = d.add(Some(latin), "span");
+        d.add_text(hidden, &"サポートの受付時間は月曜日から金曜日の午前九時から午後六時までです。".repeat(3));
+        d.set_style(hidden, "display", "none");
+        let ids: Vec<String> =
+            check_element_quality_dom(&d, latin, &BrowserConfig::default()).into_iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec!["wide-tracking"]);
     }
 
     /// Uppercase costs reading only when the run is long enough to be read as

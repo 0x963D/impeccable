@@ -664,10 +664,15 @@ fn is_demo_window<N: ContextNode>(c: &N) -> bool {
 /// `<article>` with a 44px title bar and three dots, and a page's own
 /// article, section or header does not open with a row of traffic lights.
 /// The preview-caption form stays off landmarks, where a section's first
-/// child is often a heading band.
+/// child is often a heading band. A landmark is held to the measured test:
+/// its box, its bar and the dots all have rects, so the bar's size and
+/// place and the dots' leading edge are read, not assumed.
 fn is_traffic_light_window<N: ContextNode>(c: &N) -> bool {
-    title_bar(c).is_some_and(|bar| bar_leads_with_traffic_lights(&bar) == Some(true))
-        && !landmark_holds_the_page(c)
+    let Some(bar) = title_bar(c) else { return false };
+    let measured = c.rect().is_some()
+        && bar.rect().is_some()
+        && find_dot_trio(&bar).is_some_and(|trio| trio.iter().all(|d| d.rect().is_some()));
+    measured && bar_leads_with_traffic_lights(&bar) == Some(true) && !landmark_holds_the_page(c)
 }
 
 /// Whether a landmark is the page's own content rather than a drawing on
@@ -1559,6 +1564,20 @@ mod tests {
         }
         let pane = art.add("div").rect(0.0, 36.0, 600.0, 364.0);
         let text = pane.add("span").text("847 results").font(9.0);
+        assert!(!in_framed_demo(&text));
+        // An unsized landmark whose unsized first child holds three dots
+        // (review): with no rects for the box and the bar, their size and
+        // place and the dots' leading edge are not known, and the landmark
+        // stays one the walk passes through.
+        let (_t, body) = Tree::new();
+        body.add("p").text("Glowcase turns your product into an interactive demo that buyers explore on their own.");
+        let art = body.add("article");
+        let bar = art.add("div");
+        let lights = bar.add("div");
+        for i in 0..3 {
+            dot(&lights, 12.0 + 16.0 * i as f64);
+        }
+        let text = art.add("div").add("span").text("847 results").font(9.0);
         assert!(!in_framed_demo(&text));
     }
 
