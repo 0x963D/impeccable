@@ -2726,8 +2726,9 @@ pub fn check_element_radial_spotlight_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHi
 /// video, so 30% of it shows. A video counts only when it has a `poster`
 /// (an autoplay video with no poster paints nothing until a frame is
 /// decoded, and never where autoplay is blocked); an image when the capture
-/// saw it complete with a size of its own. Anything the capture cannot tell
-/// about leaves the glow as it is (1).
+/// saw it complete with a size of its own, and neither counts under a mask or
+/// a `clip-path`. Anything the capture cannot tell about leaves the glow as
+/// it is (1).
 fn share_left_by_covering_media(dom: &dyn Dom, el: ElId, rect: &Rect) -> f64 {
     let Some(parent) = dom.parent(el) else { return 1.0 };
     if !rect.all_finite() || rect.width <= 0.0 || rect.height <= 0.0 {
@@ -2774,6 +2775,11 @@ fn share_left_by_covering_media(dom: &dyn Dom, el: ElId, rect: &Rect) -> f64 {
             continue;
         }
         if !crate::browser::painted::painted_at_capture(dom, media) {
+            continue;
+        }
+        // A mask or clip-path can leave the glow showing where the box
+        // covers it (a full-size photo faded out by a `mask-image`).
+        if crate::browser::text_layers::masked_or_clipped(dom, media) {
             continue;
         }
         let m = dom.rect(media);
@@ -6772,6 +6778,28 @@ mod tests {
         assert_eq!(run("/images/noise.svg"), 1);
     }
 
+    /// Review: a full-size photo faded out by a `mask-image`, or cut by a
+    /// `clip-path`, covers the glow with its box but not with its paint.
+    #[test]
+    fn radial_spotlight_sees_past_a_masked_or_clipped_photo() {
+        let run = |styles: &[(&str, &str)]| {
+            let (mut d, section, glow) =
+                dark_page_with_glow("radial-gradient(circle, rgba(171, 151, 116, 0.35) 0%, transparent 28%)");
+            let img = d.add(Some(section), "img");
+            d.set_attr(img, "src", "/images/hero.jpg");
+            d.el_mut(img).image_complete = Some(true);
+            d.el_mut(img).image_natural_size = Some((1600.0, 1000.0));
+            d.set_styles(img, &[("position", "absolute"), ("opacity", "1"), ("objectFit", "cover")]);
+            d.set_styles(img, styles);
+            d.set_rect(img, 0.0, 0.0, 803.0, 502.0);
+            check_element_radial_spotlight_dom(&d, glow).len()
+        };
+        assert_eq!(run(&[("maskImage", "none"), ("clipPath", "none")]), 0);
+        assert_eq!(run(&[("maskImage", "linear-gradient(black, transparent)")]), 1);
+        assert_eq!(run(&[("webkitMaskImage", "linear-gradient(black, transparent)")]), 1);
+        assert_eq!(run(&[("clipPath", "inset(0px 50% 0px 0px)")]), 1);
+    }
+
     #[test]
     fn radial_spotlight_measures_a_hero_painted_with_a_gradient() {
         // The commonest way to build this pattern: a glow layer over a hero
@@ -8504,6 +8532,33 @@ mod tests {
         assert!(reports_contrast(&run(Some(false), 1334.0, 35.0)));
         assert!(reports_contrast(&run(None, 1334.0, 35.0)));
         assert!(reports_contrast(&run(Some(true), 1334.0, 12.0)));
+    }
+
+    /// Review: a photo masked or clipped over the initials may leave them
+    /// showing, so its box covering them is no proof its paint does.
+    #[test]
+    fn a_masked_or_clipped_photo_over_initials_leaves_their_verdict() {
+        let run = |on_wrap: bool, styles: &[(&str, &str)]| {
+            let (mut d, body) = page();
+            let top = 1334.0;
+            let avatar = bare_box(&mut d, body, "div", (665.0, top, 35.0, 35.0));
+            d.set_style(avatar, "position", "relative");
+            let initial = faint_copy(&mut d, avatar, "rgb(220, 220, 220)", (670.0, top + 8.0, 20.0, 18.0));
+            d.set_styles(initial, &[("position", "absolute"), ("zIndex", "auto")]);
+            let wrap = bare_box(&mut d, avatar, "div", (665.0, top, 35.0, 35.0));
+            d.set_styles(wrap, &[("position", "absolute"), ("zIndex", "auto"), ("opacity", "1")]);
+            let img = bare_box(&mut d, wrap, "img", (665.0, top, 35.0, 35.0));
+            d.set_styles(img, &[("opacity", "1"), ("objectFit", "cover")]);
+            d.set_styles(if on_wrap { wrap } else { img }, styles);
+            d.el_mut(img).image_complete = Some(true);
+            d.el_mut(img).image_natural_size = Some((96.0, 96.0));
+            d.set_attr(img, "src", "/avatars/sophia.webp");
+            reports_contrast(&colors(&d, initial))
+        };
+        assert!(!run(false, &[("maskImage", "none"), ("clipPath", "none")]));
+        assert!(run(false, &[("maskImage", "linear-gradient(black, transparent)")]));
+        assert!(run(true, &[("webkitMaskImage", "radial-gradient(black, transparent)")]));
+        assert!(run(false, &[("clipPath", "inset(0px 0px 0px 60%)")]));
     }
 
     /// In a flex avatar whose photo wrapper is an in-flow item, CSS `order`

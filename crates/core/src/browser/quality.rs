@@ -4415,6 +4415,17 @@ mod tests {
                 "fade-up".into(),
                 vec![frame(&[("opacity", "0"), ("transform", "translateY(20px)")]), frame(&[("opacity", "1"), ("transform", "none")])],
             );
+            d.keyframes.insert(
+                "fade-up-offset".into(),
+                vec![
+                    frame(&[("opacity", "0"), ("transform", "translateX(40px) translateY(20px)")]),
+                    frame(&[("opacity", "1"), ("transform", "translate(40px, 0px)")]),
+                ],
+            );
+            d.keyframes.insert(
+                "slide-in".into(),
+                vec![frame(&[("transform", "translateX(120px)")]), frame(&[("transform", "translateX(0px)")])],
+            );
             let wrapper = d.add(Some(body), "main");
             d.set_rect(wrapper, 0.0, 0.0, 390.0, 2400.0);
             let quote = d.add(Some(wrapper), "div");
@@ -4455,6 +4466,14 @@ mod tests {
         // overflow is real whatever frame the entrance was caught at.
         let fade_up = [("animationName", "fade-up"), ("animationIterationCount", "1"), ("transform", "matrix(1, 0, 0, 1, 0, 12)")];
         assert_eq!(run(Some(vec!["transform", "opacity"]), &fade_up, true), 1);
+        // A fade-up that keeps the same x offset in every frame moves only
+        // on y (review): the sideways offset the capture read is where the
+        // box ends, and the overflow is real.
+        let held = [("animationName", "fade-up-offset"), ("animationIterationCount", "1"), ("transform", "matrix(1, 0, 0, 1, 40, 12)")];
+        assert_eq!(run(Some(vec!["transform", "opacity"]), &held, false), 1);
+        // A transform slide that changes x is still a move that ends.
+        let slide_x = [("animationName", "slide-in"), ("animationIterationCount", "1"), ("transform", "matrix(1, 0, 0, 1, 79, 0)")];
+        assert_eq!(run(Some(vec!["transform"]), &slide_x, false), 0);
         // A transform moved by script (a Web Animations loop) with no CSS
         // animation or transition to trace it is unknown.
         let untraced = [("transform", "matrix(1, 0, 0, 1, -40, 0)")];

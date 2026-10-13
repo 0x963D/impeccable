@@ -1589,14 +1589,81 @@ fn moves_sideways(dom: &dyn Dom, el: ElId, p: &str) -> bool {
             } else {
                 None
             };
-            x.is_some_and(|x| x.is_finite() && x.abs() >= 1.0)
+            x.is_some_and(|x| x.is_finite() && x.abs() >= 1.0) && !keyframes_hold_x(dom, el, p)
         }
         "translate" => {
             let t = dom.style(el, "translate");
             t.split_whitespace().next().map(js::parse_float).is_some_and(|x| x.is_finite() && x.abs() >= 1.0)
+                && !keyframes_hold_x(dom, el, p)
         }
         _ => false,
     }
+}
+
+/// Whether every animation on `el` whose keyframes set `p` (`transform` or
+/// `translate`) holds the x offset still: at least two of its frames set
+/// `p`, and each states the same x (a fade-up that keeps `translateX(40px)`
+/// in both frames and moves only `translateY`). Then the x offset the
+/// capture read is where the box ends, not part of a move. A transition
+/// that names `p`, no animation setting it, or a frame whose x the engine
+/// cannot read keeps the move.
+fn keyframes_hold_x(dom: &dyn Dom, el: ElId, p: &str) -> bool {
+    if declares_transition_naming(dom, el, p) {
+        return false;
+    }
+    let mut any = false;
+    for e in animation_entries(dom, el) {
+        let Some(frames) = dom.keyframes(&e.name) else { return false };
+        let xs: Vec<Option<String>> = frames
+            .iter()
+            .filter_map(|f| f.decls.iter().find(|(prop, _)| prop == p).map(|(_, v)| keyframe_x(p, v)))
+            .collect();
+        if xs.is_empty() {
+            continue;
+        }
+        if xs.len() < 2 || xs.iter().any(Option::is_none) || xs.windows(2).any(|w| w[0] != w[1]) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// The x offset a `transform` or `translate` keyframe value states, as
+/// written (`40px`, `-96%`), `0` where it moves nothing on x, and `None`
+/// where it is anything but translations the engine can read.
+fn keyframe_x(p: &str, value: &str) -> Option<String> {
+    let value = js::to_lower_case(js::trim(value));
+    if value == "none" {
+        return Some("0".into());
+    }
+    let norm = |t: &str| {
+        let t = js::trim(t);
+        if js::parse_float(t) == 0.0 { "0".to_string() } else { t.to_string() }
+    };
+    if p == "translate" {
+        return value.split_whitespace().next().map(norm);
+    }
+    let mut xs: Vec<String> = Vec::new();
+    let mut rest = value.as_str();
+    while !js::trim(rest).is_empty() {
+        let r = rest.trim_start();
+        let open = r.find('(')?;
+        let close = r.find(')')?;
+        let (name, args) = (js::trim(&r[..open]), &r[open + 1..close]);
+        let args: Vec<&str> = args.split(',').collect();
+        match name {
+            "translatex" => xs.push(norm(args[0])),
+            "translate" | "translate3d" => xs.push(norm(args[0])),
+            "translatey" | "translatez" => {}
+            "matrix" if args.len() == 6 => xs.push(norm(args[4])),
+            "matrix3d" if args.len() == 16 => xs.push(norm(args[12])),
+            _ => return None,
+        }
+        rest = &r[close + 1..];
+    }
+    xs.retain(|x| x != "0");
+    Some(if xs.is_empty() { "0".into() } else { xs.join(" ") })
 }
 
 /// Whether the page traces the running property `p` on `el` to a move that

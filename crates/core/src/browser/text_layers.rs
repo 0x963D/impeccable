@@ -193,6 +193,18 @@ fn masked(dom: &dyn Dom, node: ElId) -> bool {
     })
 }
 
+/// Whether a mask or a `clip-path` on `node` can leave part of its box
+/// unpainted, so its box covering something is no proof its paint does (a
+/// photo faded out by a `mask-image` gradient).
+pub(crate) fn masked_or_clipped(dom: &dyn Dom, node: ElId) -> bool {
+    masked(dom, node)
+        || ["clipPath", "webkitClipPath"].iter().any(|prop| {
+            let value = dom.style(node, prop);
+            let value = js::trim(&value);
+            !value.is_empty() && value != "none"
+        })
+}
+
 fn px(token: &str) -> Option<f64> {
     token
         .strip_suffix("px")
@@ -633,10 +645,11 @@ fn covered_by_a_later_picture(dom: &dyn Dom, el: ElId) -> bool {
                 return false;
             }
             // A `z-index` on the picture or a box under the sibling can put
-            // it behind the initials.
+            // it behind the initials, and a mask or clip-path on the way can
+            // leave them showing.
             let mut cur = Some(img);
             while let Some(c) = cur {
-                if !opaque(c) || !z_auto(c) {
+                if !opaque(c) || !z_auto(c) || masked_or_clipped(dom, c) {
                     return false;
                 }
                 if c == sib {

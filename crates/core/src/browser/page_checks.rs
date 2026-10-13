@@ -3532,17 +3532,30 @@ const OVERPRINT_GLYPH_PROPS: &[&str] = &[
     "textTransform",
 ];
 
+/// The tallest a text rect runs, in ems of its font size, and still holds
+/// one line (a generous `line-height`).
+const OVERPRINT_ONE_LINE_EM: f64 = 1.8;
+
 /// Whether `top` sets the words `victim` starts with again, drawing the same
-/// glyphs from the same origin (within a pixel), so its glyphs land on the
-/// victim's own. Both have to carry text of their own and a measured text
+/// glyphs from the same origin (within a pixel), and, where either wraps,
+/// breaking its lines at the same width, so its glyphs land on the victim's
+/// own. Both have to carry text of their own and a measured text
 /// rect, and every property in [`OVERPRINT_GLYPH_PROPS`] has to be recorded
 /// on both and equal: `text-transform: uppercase` over the same DOM text
 /// draws other glyphs, and a value the capture did not record is unknown,
 /// which keeps the collision.
 fn overprints(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
+    // A run that wraps breaks where its width runs out: two runs of
+    // different widths set the same words on different lines past the
+    // first, and those lines collide. Past one line the two text rects have
+    // to be as wide as each other, and the top one no taller.
     let same_origin = match (dom.direct_text_rect(top), dom.direct_text_rect(victim)) {
         (Some(a), Some(b)) if a.all_finite() && b.all_finite() => {
-            (a.left - b.left).abs() <= 1.0 && (a.top - b.top).abs() <= 1.0
+            let font = parse_float(&dom.style(top, "fontSize"));
+            let wraps = !(font.is_finite() && font > 0.0) || a.height.max(b.height) > font * OVERPRINT_ONE_LINE_EM;
+            (a.left - b.left).abs() <= 1.0
+                && (a.top - b.top).abs() <= 1.0
+                && (!wraps || ((a.width - b.width).abs() <= 1.0 && a.height <= b.height + 1.0))
         }
         _ => false,
     };
@@ -6208,6 +6221,51 @@ mod tests {
         // The logo's own opaque fill hides the words after the one it
         // redraws.
         assert_eq!(run_with(0.0, "52px", &[("backgroundColor", "rgb(255, 255, 255)")]).len(), 1);
+    }
+
+    /// Review: two transparent runs of the same words from the same origin
+    /// redraw the same glyphs only while they break their lines at the same
+    /// width. Wrapped at different widths, their later lines collide.
+    #[test]
+    fn text_occlusion_keeps_runs_that_wrap_apart() {
+        const GLYPHS: &[(&str, &str)] = &[
+            ("fontWeight", "400"),
+            ("fontStyle", "normal"),
+            ("fontStretch", "100%"),
+            ("fontVariant", "normal"),
+            ("fontVariantCaps", "normal"),
+            ("fontFeatureSettings", "normal"),
+            ("letterSpacing", "normal"),
+            ("wordSpacing", "0px"),
+            ("textTransform", "none"),
+            ("fontSize", "24px"),
+            ("fontFamily", "Arial"),
+        ];
+        let run = |logo_text: (f64, f64)| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let words = "Schlittermann internet consulting and hosting";
+            let tagline = d.add(Some(body), "span");
+            d.set_styles(tagline, PROBE_BASE);
+            d.set_styles(tagline, GLYPHS);
+            d.set_styles(tagline, &[("position", "absolute")]);
+            d.set_rect(tagline, 190.0, 80.0, 300.0, 90.0);
+            d.set_text_rect(tagline, 190.0, 81.0, 290.0, 84.0);
+            d.add_text(tagline, words);
+            let logo = d.add(Some(body), "a");
+            d.set_styles(logo, PROBE_BASE);
+            d.set_styles(logo, GLYPHS);
+            d.set_styles(logo, &[("position", "absolute")]);
+            d.set_rect(logo, 190.0, 80.0, logo_text.0 + 10.0, logo_text.1 + 6.0);
+            d.set_text_rect(logo, 190.0, 81.0, logo_text.0, logo_text.1);
+            d.add_text(logo, words);
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        // Wrapped at the same width, the logo redraws the tagline's glyphs.
+        assert!(run((290.0, 84.0)).is_empty());
+        // Wrapped narrower, its later lines land on other words.
+        assert_eq!(run((200.0, 112.0)).len(), 1);
     }
 
     /// v0-orbit-internal-app: a KPI label clipped by its squeezed card to the
