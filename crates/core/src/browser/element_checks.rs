@@ -592,19 +592,25 @@ pub(crate) fn read_pseudo_gradient_face(
         {
             continue;
         }
-        // A face moved or scaled at rest (a slide-in parked at
-        // `translateX(-101%)` or `scaleX(0)`) may not be under the text; the
-        // capture places only one that is not transformed.
-        // `translate: 0px` and `scale: 1` are the identity; `scale: 0` is a
-        // face parked at nothing.
+        // A face moved, scaled or turned at rest (a slide-in parked at
+        // `translateX(-101%)`, `scaleX(0)` or `rotate: 90deg`) may not be
+        // under the text; the capture places only one that is not
+        // transformed. `translate: 0px`, `scale: 1` and a zero `rotate`
+        // angle (`0deg`, `z 0deg`) are the identity; `scale: 0` is a face
+        // parked at nothing.
         let individual = |prop: &str, identity: f64| {
             let raw = pseudo_str(dom, el, which, prop);
             let raw = js::trim(&raw);
             raw.is_empty() || raw == "none" || raw.split_whitespace().all(|t| parse_float(t) == identity)
         };
+        let unrotated = {
+            let raw = pseudo_str(dom, el, which, "rotate");
+            let raw = js::trim(&raw);
+            raw.is_empty() || raw == "none" || raw.split_whitespace().last().is_some_and(|angle| parse_float(angle) == 0.0)
+        };
         let matrix: String = pseudo_str(dom, el, which, "transform").split_whitespace().collect();
         let untransformed = matrix.is_empty() || matrix == "none" || is_identity_matrix(&matrix);
-        if !(untransformed && individual("translate", 0.0) && individual("scale", 1.0)) {
+        if !(untransformed && individual("translate", 0.0) && individual("scale", 1.0) && unrotated) {
             continue;
         }
         let w = pseudo_px(dom, el, which, "width");
@@ -658,6 +664,15 @@ pub(crate) fn read_pseudo_gradient_face(
         let text = dom.direct_text_rect(el).unwrap_or(*rect);
         if !crate::browser::visual::pseudo_face_under_text(dom, el, which, &text) {
             continue;
+        }
+        // A filter on the face itself repaints its stops (`invert(1)` turns
+        // a black face white), and the host's filters (`ink_paint`) do not
+        // include it: the face is the surface, but its colours are not the
+        // stops, so the verdict is withheld.
+        let own_filter = pseudo_str(dom, el, which, "filter");
+        let own_filter = js::trim(&own_filter);
+        if !own_filter.is_empty() && own_filter != "none" {
+            return Some((None, which));
         }
         // Bottom-up: each translucent layer lands on every colour the layers
         // beneath it can show, so two 30% white washes over black reach
@@ -1394,6 +1409,20 @@ pub(crate) fn is_identity_matrix(t: &str) -> bool {
 /// text colour at a lower alpha; with one, both the glyphs and that fill
 /// fade, and `effective_bg` is replaced by what the fold says the surface
 /// looks like. A box caught mid-reveal (`opacity_at_rest`) fades nothing.
+/// The opacity [`fold_surface_opacity`] reads for one box: the end keyframe
+/// for a box a scroll or view timeline holds (`scroll_held_end_opacity`),
+/// 1 for a box caught mid-reveal (`opacity_at_rest`), else what was captured.
+fn fold_opacity_of(dom: &dyn Dom, c: ElId) -> f64 {
+    let opacity = opacity_of(dom, c);
+    if let Some(end) = crate::browser::painted::scroll_held_end_opacity(dom, c) {
+        end
+    } else if opacity < 0.999 && !opacity_at_rest(dom, c, opacity) {
+        1.0
+    } else {
+        opacity
+    }
+}
+
 fn fold_surface_opacity(
     dom: &dyn Dom,
     el: ElId,
@@ -1415,15 +1444,7 @@ fn fold_surface_opacity(
             break;
         }
         let fill = surface.overlays.iter().find(|(n, _)| *n == c).map(|(_, f)| *f);
-        let opacity = opacity_of(dom, c);
-        let opacity = if let Some(end) = crate::browser::painted::scroll_held_end_opacity(dom, c) {
-            end
-        } else if opacity < 0.999 && !opacity_at_rest(dom, c, opacity) {
-            1.0
-        } else {
-            opacity
-        };
-        layers.push((fill, opacity));
+        layers.push((fill, fold_opacity_of(dom, c)));
         cur = dom.flat_parent(c);
     }
     if !reached {
@@ -1498,6 +1519,15 @@ pub(crate) fn opacity_fold_scores_fades(dom: &dyn Dom, el: ElId, faded: &[ElId])
     // add no reason of their own).
     if on_page_ground(dom, surface.host) && crate::browser::visual::page_ground_paints_picture(dom) {
         return false;
+    }
+    // A fade a scroll or view timeline holds, whose end keyframe is opaque,
+    // the fold reads as none and the element pass scores at full strength;
+    // the pixels would be the capture-time transparent box.
+    if faded
+        .iter()
+        .all(|&n| crate::browser::painted::scroll_held_end_opacity(dom, n).is_some_and(|end| end >= 0.999))
+    {
+        return true;
     }
     let below_host = |n: ElId| match surface.host {
         None => true,
@@ -1799,7 +1829,35 @@ pub fn check_element_colors_dom(
                     .map(Some),
                 None => Some(None),
             };
-            match (through(text_color), through(visible_text), through(effective_bg), stops, through(own_bg)) {
+            // A filter repaints what is already composited: translucent ink
+            // is blended over its surface first. Filtering the two apart and
+            // blending after gives the same colour only while no channel
+            // clips (`brightness(2)` takes a half-faded black on a #c8c8c8
+            // panel to #c8c8c8 on white, not #808080). Over one surface
+            // colour the ink is blended, then filtered; over several, where
+            // the two orders part, the verdict is withheld.
+            let surfaces: Vec<Rgba> = if surface_unresolved { None } else { effective_bg }
+                .into_iter()
+                .chain(effective_bg_stops.iter().flatten().copied())
+                .collect();
+            let ink_through = |ink: Option<Rgba>| -> Option<Option<Rgba>> {
+                let Some(c) = ink.filter(|c| c.alpha_or_one() < 0.999) else { return through(ink) };
+                if let [bg] = surfaces.as_slice() {
+                    return through_filters(filters, &composite_color_over(&c, bg)).map(Some);
+                }
+                let after = through_filters(filters, &c)?;
+                let close = |a: &Rgba, b: &Rgba| {
+                    (a.r - b.r).abs() <= 2.0 && (a.g - b.g).abs() <= 2.0 && (a.b - b.b).abs() <= 2.0
+                };
+                let commutes = surfaces.iter().all(|bg| {
+                    match (through_filters(filters, &composite_color_over(&c, bg)), through_filters(filters, bg)) {
+                        (Some(exact), Some(bg_after)) => close(&exact, &composite_color_over(&after, &bg_after)),
+                        _ => false,
+                    }
+                });
+                commutes.then_some(Some(after))
+            };
+            match (ink_through(text_color), ink_through(visible_text), through(effective_bg), stops, through(own_bg)) {
                 (Some(ink), Some(visible), Some(bg), Some(stops), Some(own)) => Some((ink, visible, bg, stops, own)),
                 _ => None,
             }
@@ -9201,6 +9259,42 @@ mod tests {
         assert!(run("url(\"#duotone\") saturate(0.7)", &[]).is_empty());
     }
 
+    /// Review: a filter repaints what is already composited, so translucent
+    /// ink is blended over its surface before the filter, not after.
+    /// Half-faded black on a #c8c8c8 panel under `brightness(2)` paints
+    /// #c8c8c8 on white (1.7:1), where filtering each apart and blending
+    /// after gives #808080 on white (3.9:1) and passed 24px text.
+    #[test]
+    fn translucent_ink_is_blended_before_the_filter() {
+        let run = |filter: &str| {
+            let (mut d, body) = page();
+            let a = d.add(Some(body), "div");
+            visible(&mut d, a);
+            d.add_text(a, "Quarterly report");
+            d.set_rect(a, 40.0, 400.0, 400.0, 60.0);
+            d.set_text_rect(a, 56.0, 414.0, 210.0, 30.0);
+            d.set_styles(
+                a,
+                &[
+                    ("backgroundColor", "rgb(200, 200, 200)"),
+                    ("color", "rgba(0, 0, 0, 0.5)"),
+                    ("fontSize", "24px"),
+                    ("fontWeight", "400"),
+                    ("filter", filter),
+                ],
+            );
+            colors(&d, a).into_iter().filter(|h| h.id == "low-contrast").collect::<Vec<_>>()
+        };
+        let hits = run("brightness(2)");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("on #ffffff"), "{}", hits[0].snippet);
+        assert!(hits[0].snippet.starts_with("1.7:1"), "{}", hits[0].snippet);
+        // No channel clips under `brightness(1.1)`: both orders agree and
+        // the 24px text passes, as it does unfiltered.
+        assert!(run("brightness(1.1)").is_empty());
+        assert!(run("none").is_empty());
+    }
+
     /// observations-47 row 6, schlittermann.de 324399: the white tagline
     /// sits on a crimson `bg.png` strip that `body` draws `repeat-x` at its
     /// `auto` size over its white fill. The hit-test stacks name `body` and
@@ -9308,6 +9402,9 @@ mod tests {
                 "background",
                 "rgba(0, 0, 0, 0) linear-gradient(rgb(250, 250, 250), rgb(230, 230, 236)) no-repeat scroll 0% 0% / 100% 4px padding-box border-box",
             )],
+            // Turned at rest by the individual property (review).
+            vec![("rotate", "90deg")],
+            vec![("rotate", "z 180deg")],
             // Full size but parked below the run (review: placement).
             vec![("top", "42px")],
             // At `auto` or above, a positioned face paints over the label's
@@ -9324,8 +9421,12 @@ mod tests {
         let hits = run_with(light, "isolate", &[("opacity", "1"), ("visibility", "visible"), ("transform", "none"), ("translate", "none")]);
         assert!(hits.iter().any(|h| h.snippet.contains("(gradient on a::after)")), "{hits:?}");
         // A zero translate and a unit scale are the identity (review).
-        let hits = run_with(light, "isolate", &[("translate", "0px"), ("scale", "1")]);
+        let hits = run_with(light, "isolate", &[("translate", "0px"), ("scale", "1"), ("rotate", "0deg"), ("filter", "none")]);
         assert!(hits.iter().any(|h| h.snippet.contains("(gradient on a::after)")), "{hits:?}");
+        // A filter on the face repaints its stops (review): the face is
+        // still the surface, so the ring is not scored in its place, but
+        // the verdict is withheld. Read stop by stop the light face fails.
+        assert!(run_with(light, "isolate", &[("filter", "invert(1)")]).is_empty());
         // A face that combines into more colours than the cap is still the
         // surface: the verdict is withheld, not taken against the ring.
         // Light stops, so a face read stop by stop would fail the label.

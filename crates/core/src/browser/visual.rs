@@ -3850,6 +3850,31 @@ mod tests {
         d.set_style(p, "opacity", "1");
         d.set_styles(footer, &[("backgroundColor", "rgb(20, 20, 24)"), ("opacity", "0.8")]);
         assert_eq!(collect_visual_contrast_reasons(&d, p), vec!["opacity stack".to_string()]);
+        // A fade a view() timeline holds at 0 at the top of the page, with an
+        // opaque end keyframe, is read by the fold at full strength; the
+        // pixels would be the capture's transparent box (review).
+        d.set_styles(footer, &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("opacity", "1")]);
+        d.keyframes.insert(
+            "fade-up".into(),
+            ["0", "1"]
+                .iter()
+                .map(|o| crate::browser::dom::KeyframeFrame { decls: vec![("opacity".to_string(), o.to_string())] })
+                .collect(),
+        );
+        d.keyframe_keys.insert("fade-up".into(), vec!["0%".to_string(), "100%".to_string()]);
+        d.set_styles(
+            p,
+            &[
+                ("opacity", "0"),
+                ("animationName", "fade-up"),
+                ("animationTimeline", "view()"),
+                ("animationFillMode", "both"),
+                ("animationDirection", "normal"),
+                ("animationComposition", "replace"),
+            ],
+        );
+        d.set_running_animations(p, &["opacity"]);
+        assert!(collect_visual_contrast_reasons(&d, p).is_empty());
     }
 
     #[test]
