@@ -2353,10 +2353,8 @@ fn admin_on_repairs_project_manifest_from_user_scope_claude_skill() {
         "scripts",
         "impeccable",
     ]);
-    assert!(
-        command.replace('\\', "/").contains(&expected_launcher.replace('\\', "/")),
-        "user-scope launcher missing from repaired command: {command}"
-    );
+    let expected_command = format!("{} hook", quote_command_arg(&expected_launcher, cfg!(windows)));
+    assert_eq!(command, expected_command);
     assert!(!command.contains("CLAUDE_PROJECT_DIR"), "{command}");
 }
 
@@ -2392,10 +2390,8 @@ fn admin_on_repairs_shared_project_manifest_from_user_scope_claude_skill() {
         "scripts",
         "impeccable",
     ]);
-    assert!(
-        command.replace('\\', "/").contains(&expected_launcher.replace('\\', "/")),
-        "user-scope launcher missing from repaired shared command: {command}"
-    );
+    let expected_command = format!("{} hook", quote_command_arg(&expected_launcher, cfg!(windows)));
+    assert_eq!(command, expected_command);
     assert!(!command.contains("CLAUDE_PROJECT_DIR"), "{command}");
     let local: Value = serde_json::from_str(&t.read(".claude/settings.local.json")).unwrap();
     assert!(local.get("hooks").is_none(), "local duplicate was not pruned: {local}");
