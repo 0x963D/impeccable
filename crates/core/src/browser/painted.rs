@@ -1630,10 +1630,11 @@ fn keyframes_hold_x(dom: &dyn Dom, el: ElId, p: &str) -> bool {
     any
 }
 
-/// Whether a box above `el` turns or skews what it holds: a `transform`
-/// that is not a pure translation (a uniform scale keeps directions and
-/// counts as none), or a `rotate` other than none or 0. Under one, a move
-/// on y, or a scale of y, is a move sideways on screen.
+/// Whether a box above `el` carries a move on y into x: a `transform` whose
+/// matrix maps y into x (a rotation, a `skewX`; any scale, even unequal on
+/// the two axes, does not), one the engine cannot read, or a `rotate` other
+/// than none or 0. Under one, a move on y, or a scale of y, is a move
+/// sideways on screen.
 fn ancestor_turns(dom: &dyn Dom, el: ElId) -> bool {
     const MAX_ANCESTORS: usize = 64;
     let mut cur = dom.parent(el);
@@ -1654,7 +1655,8 @@ fn ancestor_turns(dom: &dyn Dom, el: ElId) -> bool {
         } else {
             None
         };
-        let keeps_directions = parts.is_some_and(|m| m[1] == 0.0 && m[2] == 0.0 && m[0] == m[3]);
+        // x' = a x + c y: only `c` carries a move on y into x.
+        let keeps_directions = parts.is_some_and(|m| m[2] == 0.0);
         let rotate = js::trim(&dom.style(c, "rotate")).to_string();
         let unrotated = rotate.is_empty()
             || rotate == "none"

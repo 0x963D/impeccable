@@ -4510,6 +4510,9 @@ mod tests {
             ("transform", "matrix(1, 0, 0, 1.1, 40, 0)"),
         ];
         assert_eq!(run_skewed(Some(vec!["transform"]), &tall_skewed), 0);
+        // A wrapper that only scales, even unequally, carries no move on y
+        // into x (review): the overflow stays.
+        assert_eq!(run_t(Some(vec!["transform"]), &tall_skewed, false, "matrix(2, 0, 0, 1, 0, 0)"), 1);
         // A transform moved by script (a Web Animations loop) with no CSS
         // animation or transition to trace it is unknown.
         let untraced = [("transform", "matrix(1, 0, 0, 1, -40, 0)")];
