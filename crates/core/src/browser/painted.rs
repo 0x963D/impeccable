@@ -1605,10 +1605,11 @@ fn moves_sideways(dom: &dyn Dom, el: ElId, p: &str) -> bool {
 /// `p`, and each states the same x (a fade-up that keeps `translateX(40px)`
 /// in both frames and moves only `translateY`). Then the x offset the
 /// capture read is where the box ends, not part of a move. A transition
-/// that names `p`, no animation setting it, or a frame whose x the engine
-/// cannot read keeps the move.
+/// that names `p`, no animation setting it, a frame whose x the engine
+/// cannot read, or a box above that turns or skews what it holds
+/// ([`ancestor_turns`]) keeps the move.
 fn keyframes_hold_x(dom: &dyn Dom, el: ElId, p: &str) -> bool {
-    if declares_transition_naming(dom, el, p) {
+    if declares_transition_naming(dom, el, p) || ancestor_turns(dom, el) {
         return false;
     }
     let mut any = false;
@@ -1627,6 +1628,43 @@ fn keyframes_hold_x(dom: &dyn Dom, el: ElId, p: &str) -> bool {
         any = true;
     }
     any
+}
+
+/// Whether a box above `el` turns or skews what it holds: a `transform`
+/// that is not a pure translation (a uniform scale keeps directions and
+/// counts as none), or a `rotate` other than none or 0. Under one, a move
+/// on y, or a scale of y, is a move sideways on screen.
+fn ancestor_turns(dom: &dyn Dom, el: ElId) -> bool {
+    const MAX_ANCESTORS: usize = 64;
+    let mut cur = dom.parent(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        if Some(c) == dom.body() || Some(c) == dom.document_element() {
+            return false;
+        }
+        let t = js::trim(&dom.style(c, "transform")).replace(' ', "");
+        let parts: Option<Vec<f64>> = if let Some(body) = t.strip_prefix("matrix3d(").and_then(|b| b.strip_suffix(')')) {
+            let v: Vec<f64> = body.split(',').map(js::parse_float).collect();
+            (v.len() == 16).then(|| vec![v[0], v[1], v[4], v[5]])
+        } else if let Some(body) = t.strip_prefix("matrix(").and_then(|b| b.strip_suffix(')')) {
+            let v: Vec<f64> = body.split(',').map(js::parse_float).collect();
+            (v.len() == 6).then(|| v[..4].to_vec())
+        } else if t.is_empty() || t == "none" {
+            Some(vec![1.0, 0.0, 0.0, 1.0])
+        } else {
+            None
+        };
+        let keeps_directions = parts.is_some_and(|m| m[1] == 0.0 && m[2] == 0.0 && m[0] == m[3]);
+        let rotate = js::trim(&dom.style(c, "rotate")).to_string();
+        let unrotated = rotate.is_empty()
+            || rotate == "none"
+            || rotate.split_whitespace().last().is_some_and(|a| js::parse_float(a) == 0.0);
+        if !keeps_directions || !unrotated {
+            return true;
+        }
+        cur = dom.parent(c);
+    }
+    false
 }
 
 /// The x offset a `transform` or `translate` keyframe value states, with

@@ -4398,7 +4398,7 @@ mod tests {
         };
         // `mover` takes the animation (or transition) and its running
         // properties; `wrapper` says whether a wrapper holds the quote.
-        let run = |running: Option<Vec<&str>>, styles: &[(&str, &str)], on_wrapper: bool| {
+        let run_t = |running: Option<Vec<&str>>, styles: &[(&str, &str)], on_wrapper: bool, wrapper_transform: &str| {
             let mut d = FakeDom::new();
             let (html, body) = d.with_page();
             d.inner_width = 390.0;
@@ -4442,6 +4442,7 @@ mod tests {
             );
             let wrapper = d.add(Some(body), "main");
             d.set_rect(wrapper, 0.0, 0.0, 390.0, 2400.0);
+            d.set_style(wrapper, "transform", wrapper_transform);
             let quote = d.add(Some(wrapper), "div");
             d.set_style(quote, "position", "relative");
             d.set_rect(quote, 119.0, 700.0, 350.0, 320.0);
@@ -4454,6 +4455,11 @@ mod tests {
             d.set_text_rect(p, 143.0, 724.0, 310.0, 96.0);
             check_page_overflow_dom(&d).len()
         };
+        let run = |running: Option<Vec<&str>>, styles: &[(&str, &str)], on_wrapper: bool| {
+            run_t(running, styles, on_wrapper, "none")
+        };
+        let run_skewed =
+            |running: Option<Vec<&str>>, styles: &[(&str, &str)]| run_t(running, styles, false, "matrix(1, 0, 0.2, 1, 0, 0)");
         let slide = [("animationName", "quote-appear-right"), ("animationIterationCount", "1")];
         assert_eq!(run(Some(vec!["right", "opacity"]), &slide, false), 0);
         // A transition that names the property traces it too.
@@ -4496,6 +4502,14 @@ mod tests {
         // stays after the animation.
         let tall = [("animationName", "grow-tall"), ("animationIterationCount", "1"), ("transform", "matrix(1, 0, 0, 1.1, 40, 0)")];
         assert_eq!(run(Some(vec!["transform"]), &tall, false), 1);
+        // Under a wrapper that skews what it holds, a change of y moves the
+        // text sideways on screen (review): still a move that ends.
+        let tall_skewed = [
+            ("animationName", "grow-tall"),
+            ("animationIterationCount", "1"),
+            ("transform", "matrix(1, 0, 0, 1.1, 40, 0)"),
+        ];
+        assert_eq!(run_skewed(Some(vec!["transform"]), &tall_skewed), 0);
         // A transform moved by script (a Web Animations loop) with no CSS
         // animation or transition to trace it is unknown.
         let untraced = [("transform", "matrix(1, 0, 0, 1, -40, 0)")];
