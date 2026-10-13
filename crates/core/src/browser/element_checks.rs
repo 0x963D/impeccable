@@ -1841,7 +1841,13 @@ pub fn check_element_colors_dom(
                 .chain(effective_bg_stops.iter().flatten().copied())
                 .collect();
             let ink_through = |ink: Option<Rgba>| -> Option<Option<Rgba>> {
-                let Some(c) = ink.filter(|c| c.alpha_or_one() < 0.999) else { return through(ink) };
+                // Ink at or under the transparent floor paints nothing and
+                // keeps its alpha, so the verdict still skips it.
+                let Some(c) = ink.filter(|c| {
+                    c.alpha_or_one() < 0.999 && c.alpha_or_one() > crate::checks::rules::TRANSPARENT_INK_FLOOR
+                }) else {
+                    return through(ink);
+                };
                 if let [bg] = surfaces.as_slice() {
                     return through_filters(filters, &composite_color_over(&c, bg)).map(Some);
                 }
@@ -9293,6 +9299,31 @@ mod tests {
         // the 24px text passes, as it does unfiltered.
         assert!(run("brightness(1.1)").is_empty());
         assert!(run("none").is_empty());
+    }
+
+    /// Review: ink at the transparent floor paints nothing, and blending it
+    /// over the surface before the filter must not make it opaque text in
+    /// the surface's colour (a 1.0:1 on a hidden label).
+    #[test]
+    fn invisible_ink_under_a_filter_takes_no_verdict() {
+        let (mut d, body) = page();
+        let a = d.add(Some(body), "div");
+        visible(&mut d, a);
+        d.add_text(a, "Saved");
+        d.set_rect(a, 40.0, 400.0, 400.0, 60.0);
+        d.set_text_rect(a, 56.0, 414.0, 210.0, 30.0);
+        d.set_styles(
+            a,
+            &[
+                ("backgroundColor", "rgb(200, 200, 200)"),
+                ("color", "rgba(0, 0, 0, 0.01)"),
+                ("fontSize", "24px"),
+                ("fontWeight", "400"),
+                ("filter", "brightness(2)"),
+            ],
+        );
+        let hits: Vec<_> = colors(&d, a).into_iter().filter(|h| h.id == "low-contrast").collect();
+        assert!(hits.is_empty(), "{hits:?}");
     }
 
     /// observations-47 row 6, schlittermann.de 324399: the white tagline
