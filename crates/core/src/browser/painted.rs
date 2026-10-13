@@ -1629,9 +1629,19 @@ fn keyframes_hold_x(dom: &dyn Dom, el: ElId, p: &str) -> bool {
     any
 }
 
+/// Whether a matrix's components, past the translation ones at `skip`, are
+/// the identity's: 1 at `ones`, 0 everywhere else.
+fn identity_except(args: &[&str], skip: &[usize], ones: &[usize]) -> bool {
+    args.iter().enumerate().filter(|(i, _)| !skip.contains(i)).all(|(i, v)| {
+        let v = js::parse_float(js::trim(v));
+        v == if ones.contains(&i) { 1.0 } else { 0.0 }
+    })
+}
+
 /// The x offset a `transform` or `translate` keyframe value states, as
 /// written (`40px`, `-96%`), `0` where it moves nothing on x, and `None`
-/// where it is anything but translations the engine can read.
+/// where it is anything but translations the engine can read (a matrix
+/// that also scales or skews is not one).
 fn keyframe_x(p: &str, value: &str) -> Option<String> {
     let value = js::to_lower_case(js::trim(value));
     if value == "none" {
@@ -1656,8 +1666,12 @@ fn keyframe_x(p: &str, value: &str) -> Option<String> {
             "translatex" => xs.push(norm(args[0])),
             "translate" | "translate3d" => xs.push(norm(args[0])),
             "translatey" | "translatez" => {}
-            "matrix" if args.len() == 6 => xs.push(norm(args[4])),
-            "matrix3d" if args.len() == 16 => xs.push(norm(args[12])),
+            // Only a pure translation: a scale or skew beside it moves
+            // what the box holds sideways too.
+            "matrix" if args.len() == 6 && identity_except(&args, &[4, 5], &[0, 3]) => xs.push(norm(args[4])),
+            "matrix3d" if args.len() == 16 && identity_except(&args, &[12, 13, 14], &[0, 5, 10, 15]) => {
+                xs.push(norm(args[12]))
+            }
             _ => return None,
         }
         rest = &r[close + 1..];

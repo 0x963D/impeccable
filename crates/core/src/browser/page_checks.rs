@@ -3532,27 +3532,44 @@ const OVERPRINT_GLYPH_PROPS: &[&str] = &[
     "textTransform",
 ];
 
-/// The tallest a text rect runs, in ems of its font size, and still holds
-/// one line (a generous `line-height`).
-const OVERPRINT_ONE_LINE_EM: f64 = 1.8;
+/// How many of its lines a text rect may run to and still hold one: a
+/// second line takes it to two.
+const OVERPRINT_WRAP_LINES: f64 = 1.5;
+
+/// The height one line of `el`'s text takes: its `line-height` in pixels,
+/// or 1.2 of its font size where that is `normal` or a measure no wider
+/// than the font's own box, which is what a text rect may measure instead.
+/// `None` where the font size is not recorded.
+fn one_line_px(dom: &dyn Dom, el: ElId) -> Option<f64> {
+    let font = parse_float(&dom.style(el, "fontSize"));
+    if !(font.is_finite() && font > 0.0) {
+        return None;
+    }
+    let line = parse_float(&dom.style(el, "lineHeight"));
+    let line = if line.is_finite() && line > 0.0 { line } else { 0.0 };
+    Some(line.max(font * 1.2))
+}
 
 /// Whether `top` sets the words `victim` starts with again, drawing the same
-/// glyphs from the same origin (within a pixel), and, where either wraps,
-/// breaking its lines at the same width, so its glyphs land on the victim's
-/// own. Both have to carry text of their own and a measured text
+/// glyphs from the same origin (within a pixel), and, where the top run
+/// wraps, breaking its lines at the same width, so its glyphs land on the
+/// victim's own. Both have to carry text of their own and a measured text
 /// rect, and every property in [`OVERPRINT_GLYPH_PROPS`] has to be recorded
 /// on both and equal: `text-transform: uppercase` over the same DOM text
 /// draws other glyphs, and a value the capture did not record is unknown,
 /// which keeps the collision.
 fn overprints(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
-    // A run that wraps breaks where its width runs out: two runs of
-    // different widths set the same words on different lines past the
-    // first, and those lines collide. Past one line the two text rects have
-    // to be as wide as each other, and the top one no taller.
+    // A top run on one line redraws the start of the victim's first line,
+    // however the victim wraps after it. A top run that wraps breaks where
+    // its width runs out, and its later lines land on the victim's only
+    // where the victim breaks at the same width: then the two text rects
+    // are as wide as each other, and the top one no taller.
     let same_origin = match (dom.direct_text_rect(top), dom.direct_text_rect(victim)) {
         (Some(a), Some(b)) if a.all_finite() && b.all_finite() => {
-            let font = parse_float(&dom.style(top, "fontSize"));
-            let wraps = !(font.is_finite() && font > 0.0) || a.height.max(b.height) > font * OVERPRINT_ONE_LINE_EM;
+            let wraps = match one_line_px(dom, top) {
+                Some(line) => a.height > line * OVERPRINT_WRAP_LINES,
+                None => true,
+            };
             (a.left - b.left).abs() <= 1.0
                 && (a.top - b.top).abs() <= 1.0
                 && (!wraps || ((a.width - b.width).abs() <= 1.0 && a.height <= b.height + 1.0))
@@ -6241,31 +6258,40 @@ mod tests {
             ("fontSize", "24px"),
             ("fontFamily", "Arial"),
         ];
-        let run = |logo_text: (f64, f64)| {
+        // `tagline` and `logo` are the two runs' text rects (width, height).
+        let run = |tagline_text: (f64, f64), logo_text: (f64, f64), line_height: &str| {
             let mut d = FakeDom::new();
             let (_h, body) = d.with_page();
             let words = "Schlittermann internet consulting and hosting";
             let tagline = d.add(Some(body), "span");
             d.set_styles(tagline, PROBE_BASE);
             d.set_styles(tagline, GLYPHS);
-            d.set_styles(tagline, &[("position", "absolute")]);
-            d.set_rect(tagline, 190.0, 80.0, 300.0, 90.0);
-            d.set_text_rect(tagline, 190.0, 81.0, 290.0, 84.0);
+            d.set_styles(tagline, &[("position", "absolute"), ("lineHeight", line_height)]);
+            d.set_rect(tagline, 190.0, 80.0, tagline_text.0 + 10.0, tagline_text.1 + 6.0);
+            d.set_text_rect(tagline, 190.0, 81.0, tagline_text.0, tagline_text.1);
             d.add_text(tagline, words);
             let logo = d.add(Some(body), "a");
             d.set_styles(logo, PROBE_BASE);
             d.set_styles(logo, GLYPHS);
-            d.set_styles(logo, &[("position", "absolute")]);
+            d.set_styles(logo, &[("position", "absolute"), ("lineHeight", line_height)]);
             d.set_rect(logo, 190.0, 80.0, logo_text.0 + 10.0, logo_text.1 + 6.0);
             d.set_text_rect(logo, 190.0, 81.0, logo_text.0, logo_text.1);
             d.add_text(logo, words);
             mark_body_descendants(&mut d);
-            check_text_occlusion_dom(&d)
+            check_text_occlusion_dom(&d).len()
         };
         // Wrapped at the same width, the logo redraws the tagline's glyphs.
-        assert!(run((290.0, 84.0)).is_empty());
+        assert_eq!(run((290.0, 84.0), (290.0, 84.0), "normal"), 0);
         // Wrapped narrower, its later lines land on other words.
-        assert_eq!(run((200.0, 112.0)).len(), 1);
+        assert_eq!(run((290.0, 84.0), (200.0, 112.0), "normal"), 1);
+        // On one line, the logo redraws the start of the tagline's first
+        // line however the tagline wraps after it (review): narrower than
+        // the tagline's two-line rect, at a normal line-height and at a
+        // `line-height: 2` that makes one line 48px tall.
+        assert_eq!(run((290.0, 56.0), (280.0, 28.0), "normal"), 0);
+        assert_eq!(run((290.0, 96.0), (280.0, 48.0), "48px"), 0);
+        // The same 48px rect at a normal line-height is two lines.
+        assert_eq!(run((290.0, 96.0), (280.0, 48.0), "normal"), 1);
     }
 
     /// v0-orbit-internal-app: a KPI label clipped by its squeezed card to the

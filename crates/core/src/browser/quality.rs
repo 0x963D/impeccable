@@ -4423,6 +4423,13 @@ mod tests {
                 ],
             );
             d.keyframes.insert(
+                "grow-in-place".into(),
+                vec![
+                    frame(&[("transform", "matrix(1.2, 0, 0, 1.2, 40, 0)")]),
+                    frame(&[("transform", "matrix(1, 0, 0, 1, 40, 0)")]),
+                ],
+            );
+            d.keyframes.insert(
                 "slide-in".into(),
                 vec![frame(&[("transform", "translateX(120px)")]), frame(&[("transform", "translateX(0px)")])],
             );
@@ -4474,6 +4481,10 @@ mod tests {
         // A transform slide that changes x is still a move that ends.
         let slide_x = [("animationName", "slide-in"), ("animationIterationCount", "1"), ("transform", "matrix(1, 0, 0, 1, 79, 0)")];
         assert_eq!(run(Some(vec!["transform"]), &slide_x, false), 0);
+        // A matrix that keeps x at 40px but scales moves what the box holds
+        // sideways (review): still a move that ends.
+        let grow = [("animationName", "grow-in-place"), ("animationIterationCount", "1"), ("transform", "matrix(1.1, 0, 0, 1.1, 40, 0)")];
+        assert_eq!(run(Some(vec!["transform"]), &grow, false), 0);
         // A transform moved by script (a Web Animations loop) with no CSS
         // animation or transition to trace it is unknown.
         let untraced = [("transform", "matrix(1, 0, 0, 1, -40, 0)")];
