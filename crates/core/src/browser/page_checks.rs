@@ -3560,19 +3560,24 @@ fn one_line_px(dom: &dyn Dom, el: ElId) -> Option<f64> {
 /// which keeps the collision.
 fn overprints(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
     // A top run on one line redraws the start of the victim's first line,
-    // however the victim wraps after it. A top run that wraps breaks where
-    // its width runs out, and its later lines land on the victim's only
-    // where the victim breaks at the same width: then the two text rects
-    // are as wide as each other, and the top one no taller.
+    // where it is no wider than the victim's text: wider, it runs past every
+    // line the victim breaks, setting words the victim puts lower down. A
+    // top run that wraps breaks where its width runs out, and its later
+    // lines land on the victim's only where the victim breaks at the same
+    // width: then the two text rects are as wide as each other, and the top
+    // one no taller.
     let same_origin = match (dom.direct_text_rect(top), dom.direct_text_rect(victim)) {
         (Some(a), Some(b)) if a.all_finite() && b.all_finite() => {
             let wraps = match one_line_px(dom, top) {
                 Some(line) => a.height > line * OVERPRINT_WRAP_LINES,
                 None => true,
             };
-            (a.left - b.left).abs() <= 1.0
-                && (a.top - b.top).abs() <= 1.0
-                && (!wraps || ((a.width - b.width).abs() <= 1.0 && a.height <= b.height + 1.0))
+            let placed = if wraps {
+                (a.width - b.width).abs() <= 1.0 && a.height <= b.height + 1.0
+            } else {
+                a.width <= b.width + 1.0
+            };
+            (a.left - b.left).abs() <= 1.0 && (a.top - b.top).abs() <= 1.0 && placed
         }
         _ => false,
     };
@@ -6289,6 +6294,9 @@ mod tests {
         // the tagline's two-line rect, at a normal line-height and at a
         // `line-height: 2` that makes one line 48px tall.
         assert_eq!(run((290.0, 56.0), (280.0, 28.0), "normal"), 0);
+        // A one-line run wider than the wrapped victim's text sets words
+        // the victim puts on its second line (review).
+        assert_eq!(run((200.0, 56.0), (280.0, 28.0), "normal"), 1);
         assert_eq!(run((290.0, 96.0), (280.0, 48.0), "48px"), 0);
         // The same 48px rect at a normal line-height is two lines.
         assert_eq!(run((290.0, 96.0), (280.0, 48.0), "normal"), 1);

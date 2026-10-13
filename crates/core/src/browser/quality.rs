@@ -4423,6 +4423,13 @@ mod tests {
                 ],
             );
             d.keyframes.insert(
+                "grow-tall".into(),
+                vec![
+                    frame(&[("transform", "matrix(1, 0, 0, 1.2, 40, 0)")]),
+                    frame(&[("transform", "translateX(40px)")]),
+                ],
+            );
+            d.keyframes.insert(
                 "grow-in-place".into(),
                 vec![
                     frame(&[("transform", "matrix(1.2, 0, 0, 1.2, 40, 0)")]),
@@ -4485,6 +4492,10 @@ mod tests {
         // sideways (review): still a move that ends.
         let grow = [("animationName", "grow-in-place"), ("animationIterationCount", "1"), ("transform", "matrix(1.1, 0, 0, 1.1, 40, 0)")];
         assert_eq!(run(Some(vec!["transform"]), &grow, false), 0);
+        // One that scales only y keeps x where it is (review): the overflow
+        // stays after the animation.
+        let tall = [("animationName", "grow-tall"), ("animationIterationCount", "1"), ("transform", "matrix(1, 0, 0, 1.1, 40, 0)")];
+        assert_eq!(run(Some(vec!["transform"]), &tall, false), 1);
         // A transform moved by script (a Web Animations loop) with no CSS
         // animation or transition to trace it is unknown.
         let untraced = [("transform", "matrix(1, 0, 0, 1, -40, 0)")];

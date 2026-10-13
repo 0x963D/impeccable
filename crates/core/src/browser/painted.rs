@@ -1629,32 +1629,47 @@ fn keyframes_hold_x(dom: &dyn Dom, el: ElId, p: &str) -> bool {
     any
 }
 
-/// Whether a matrix's components, past the translation ones at `skip`, are
-/// the identity's: 1 at `ones`, 0 everywhere else.
-fn identity_except(args: &[&str], skip: &[usize], ones: &[usize]) -> bool {
-    args.iter().enumerate().filter(|(i, _)| !skip.contains(i)).all(|(i, v)| {
-        let v = js::parse_float(js::trim(v));
-        v == if ones.contains(&i) { 1.0 } else { 0.0 }
-    })
-}
-
-/// The x offset a `transform` or `translate` keyframe value states, as
-/// written (`40px`, `-96%`), `0` where it moves nothing on x, and `None`
-/// where it is anything but translations the engine can read (a matrix
-/// that also scales or skews is not one).
+/// The x offset a `transform` or `translate` keyframe value states, with
+/// how it maps x: `1 0 | 40px` for `translateX(40px)`, the x scale and x
+/// skew before the bar and the translations, as written, after it, `0`
+/// where none moves x. A lone `matrix()` or `matrix3d()` gives its own x
+/// row, so one that scales only y (`matrix(1, 0, 0, 1.2, 40, 0)`) maps x as
+/// `translateX(40px)` does. `None` where the value is anything else the
+/// engine cannot read: another function, a matrix beside other functions
+/// (their order decides), or a 3D matrix that maps x from z or divides by w.
 fn keyframe_x(p: &str, value: &str) -> Option<String> {
     let value = js::to_lower_case(js::trim(value));
-    if value == "none" {
-        return Some("0".into());
-    }
+    // A length in pixels (a matrix's unitless offset is one) is written
+    // `40px`; any other unit stays as written.
     let norm = |t: &str| {
         let t = js::trim(t);
-        if js::parse_float(t) == 0.0 { "0".to_string() } else { t.to_string() }
+        let v = js::parse_float(t);
+        if v == 0.0 {
+            "0".to_string()
+        } else if v.is_finite() && (t.ends_with("px") || t.parse::<f64>().is_ok()) {
+            format!("{}px", js::number_to_string(v))
+        } else {
+            t.to_string()
+        }
     };
+    let num = |t: &str| {
+        let v = js::parse_float(js::trim(t));
+        v.is_finite().then_some(v)
+    };
+    let key = |a: f64, c: f64, xs: Vec<String>| {
+        let xs: Vec<String> = xs.into_iter().filter(|x| x != "0").collect();
+        let t = if xs.is_empty() { "0".to_string() } else { xs.join(" ") };
+        Some(format!("{} {} | {t}", js::number_to_string(a), js::number_to_string(c)))
+    };
+    if value == "none" {
+        return key(1.0, 0.0, Vec::new());
+    }
     if p == "translate" {
-        return value.split_whitespace().next().map(norm);
+        return key(1.0, 0.0, value.split_whitespace().next().map(norm).into_iter().collect());
     }
     let mut xs: Vec<String> = Vec::new();
+    let mut linear: Option<(f64, f64)> = None;
+    let mut functions = 0usize;
     let mut rest = value.as_str();
     while !js::trim(rest).is_empty() {
         let r = rest.trim_start();
@@ -1662,22 +1677,32 @@ fn keyframe_x(p: &str, value: &str) -> Option<String> {
         let close = r.find(')')?;
         let (name, args) = (js::trim(&r[..open]), &r[open + 1..close]);
         let args: Vec<&str> = args.split(',').collect();
+        functions += 1;
         match name {
-            "translatex" => xs.push(norm(args[0])),
-            "translate" | "translate3d" => xs.push(norm(args[0])),
+            "translatex" | "translate" | "translate3d" => xs.push(norm(args[0])),
             "translatey" | "translatez" => {}
-            // Only a pure translation: a scale or skew beside it moves
-            // what the box holds sideways too.
-            "matrix" if args.len() == 6 && identity_except(&args, &[4, 5], &[0, 3]) => xs.push(norm(args[4])),
-            "matrix3d" if args.len() == 16 && identity_except(&args, &[12, 13, 14], &[0, 5, 10, 15]) => {
-                xs.push(norm(args[12]))
+            "matrix" if args.len() == 6 => {
+                linear = Some((num(args[0])?, num(args[2])?));
+                xs.push(norm(args[4]));
+            }
+            // x' = a1 x + a2 y + a3 z + a4, over w = d1 x + d2 y + d3 z + d4.
+            "matrix3d" if args.len() == 16 => {
+                let w = [num(args[3])?, num(args[7])?, num(args[11])?, num(args[15])?];
+                if num(args[8])? != 0.0 || w != [0.0, 0.0, 0.0, 1.0] {
+                    return None;
+                }
+                linear = Some((num(args[0])?, num(args[4])?));
+                xs.push(norm(args[12]));
             }
             _ => return None,
         }
         rest = &r[close + 1..];
     }
-    xs.retain(|x| x != "0");
-    Some(if xs.is_empty() { "0".into() } else { xs.join(" ") })
+    if linear.is_some() && functions > 1 {
+        return None;
+    }
+    let (a, c) = linear.unwrap_or((1.0, 0.0));
+    key(a, c, xs)
 }
 
 /// Whether the page traces the running property `p` on `el` to a move that
