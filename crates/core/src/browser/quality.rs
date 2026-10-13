@@ -1031,8 +1031,15 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         // replacement, whose visible label is a sprite or a pseudo-element
         // (auction.co.kr's menu links). The Range has no rect for it, and the
         // fallback to the link's box put its "text" on the wrapper's edges.
+        // Text a transform draws at a readable size (0.8px under
+        // `scale(20)`) has a measured rect of its own and stays.
         let node_font = parse_float(&dom.style(node, "fontSize"));
-        if node_font.is_finite() && node_font < 1.0 {
+        if node_font.is_finite()
+            && node_font < 1.0
+            && !dom
+                .direct_text_rect(node)
+                .is_some_and(|r| r.all_finite() && r.width >= 1.0 && r.height >= 1.0)
+        {
             continue;
         }
         let br = dom.rect(node);
@@ -3409,6 +3416,16 @@ mod tests {
         d.set_style(button, "fontSize", "16px");
         let hits = check_element_quality_dom(&d, row, &BrowserConfig::default());
         assert_eq!(hits.len(), 1, "{hits:?}");
+        // Text under a pixel that a transform draws at a readable size has a
+        // measured rect, and is measured there (review): 0.8px under
+        // `scale(20)` crowds the border as 16px text would.
+        d.set_style(button, "fontSize", "0.8px");
+        d.set_text_rect(button, 24.0, 4.0, 300.0, 50.0);
+        let hits = check_element_quality_dom(&d, row, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        // A zero-size text rect is still the sprite's hidden label.
+        d.set_text_rect(button, 24.0, 4.0, 0.0, 0.0);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
     }
 
     /// observations-47 row 13: midilibre.fr's footer band holds its text
