@@ -134,6 +134,19 @@ fn claude_manifest_for_command(cmd: &str) -> Value {
     ])
 }
 
+/// The guarded absolute-launcher command a user-scope install writes into
+/// `~/.claude/settings.json` (the `update --user` form): POSIX single quotes,
+/// double quotes on Windows.
+fn user_claude_hook_command(skill_root: &str, win32: bool) -> String {
+    let launcher = jsp::join(&[skill_root, "scripts", "impeccable"]);
+    let q = if win32 {
+        serde_json::to_string(&launcher).unwrap_or_default()
+    } else {
+        format!("'{}'", launcher.replace('\'', "'\\''"))
+    };
+    format!("[ ! -f {q} ] || {q} hook")
+}
+
 fn claude_manifest() -> Value {
     claude_manifest_for_command(CLAUDE_HOOK_COMMAND)
 }
@@ -763,21 +776,25 @@ fn repair_hook_manifests(rt: &Runtime, cwd: &str) -> Result<Repaired, String> {
         } else {
             continue;
         };
-        if let Some(sd) = &shared_dest {
+        let mut user_settings = target.user_settings;
+        if user_scoped {
+            // A user-scope skill gets its hook where a user-scope install
+            // writes it: `~/.claude/settings.json`, with the absolute launcher.
+            // In the project only the gitignored `settings.local.json` loses
+            // its Impeccable entries; the committed `settings.json` belongs to
+            // the team and is never rewritten with a home path.
+            prune_impeccable_hook_from_manifest(&dest)?;
+            dest = jsp::join(&[&rt.homedir(), ".claude", "settings.json"]);
+            user_settings = true;
+        } else if let Some(sd) = &shared_dest {
             if file_has_impeccable_hook_marker(sd) {
                 prune_impeccable_hook_from_manifest(&dest)?;
-                if user_scoped {
-                    dest = sd.clone();
-                } else {
-                    result.already.push(target.provider.to_string());
-                    continue;
-                }
+                result.already.push(target.provider.to_string());
+                continue;
             }
         }
-        let fresh = if target.provider == ".claude" && user_scoped {
-            let launcher = jsp::join(&[&skill_root, "scripts", "impeccable"]);
-            let command = format!("{} hook", quote_command_arg(&launcher, rt.win32));
-            claude_manifest_for_command(&command)
+        let fresh = if user_scoped {
+            claude_manifest_for_command(&user_claude_hook_command(&skill_root, rt.win32))
         } else {
             (target.manifest)()
         };
@@ -790,8 +807,8 @@ fn repair_hook_manifests(rt: &Runtime, cwd: &str) -> Result<Repaired, String> {
                     next = merge_hook_manifests(&existing, &fresh);
                 }
                 // The user's whole settings file: never replace it.
-                None if target.user_settings => {
-                    result.skipped.push(target.dest_rel.to_string());
+                None if user_settings => {
+                    result.skipped.push(if user_scoped { dest.clone() } else { target.dest_rel.to_string() });
                     continue;
                 }
                 None => {
@@ -813,7 +830,11 @@ fn repair_hook_manifests(rt: &Runtime, cwd: &str) -> Result<Repaired, String> {
         }
         backup_commented(&dest, had_comments)?;
         std::fs::create_dir_all(jsp::dirname(&dest)).map_err(|e| e.to_string())?;
-        std::fs::write(&dest, serialized).map_err(|e| e.to_string())?;
+        if user_settings {
+            impeccable_common::fsx::write_atomic(&dest, serialized.as_bytes()).map_err(|e| e.to_string())?;
+        } else {
+            std::fs::write(&dest, serialized).map_err(|e| e.to_string())?;
+        }
         result.written.push(target.provider.to_string());
     }
     Ok(result)

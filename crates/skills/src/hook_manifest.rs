@@ -527,7 +527,8 @@ pub fn copy_provider_hooks(sys: &crate::providers::Sys, bundle_dir: &str, root: 
                 }
             }
             util::mkdir_p(&jsp::dirname(&artifact.dest))?;
-            util::write_bytes(&artifact.dest, format!("{}\n", util::json_pretty(&next)).as_bytes())?;
+            // Atomic: in user scope this is the user's whole Claude settings file.
+            impeccable_common::fsx::write_atomic(&artifact.dest, format!("{}\n", util::json_pretty(&next)).as_bytes()).map_err(|e| util::node_error("open", &artifact.dest, &e))?;
             if !written.contains(provider) {
                 written.push(provider);
             }

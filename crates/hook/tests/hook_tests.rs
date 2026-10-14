@@ -2326,15 +2326,26 @@ fn admin_on_writes_launcher_manifests_for_every_harness() {
     assert!(out.ends_with("Hook manifests already installed for: .claude, .agents, .cursor, .github.\n"), "{out}");
 }
 
+fn expected_user_claude_hook_command(home: &str) -> String {
+    let launcher = jsp::join(&[home, ".claude", "skills", "impeccable", "scripts", "impeccable"]);
+    let q = if cfg!(windows) {
+        serde_json::to_string(&launcher).unwrap()
+    } else {
+        format!("'{}'", launcher.replace('\'', "'\\''"))
+    };
+    format!("[ ! -f {q} ] || {q} hook")
+}
+
 #[test]
 fn admin_on_repairs_project_manifest_from_user_scope_claude_skill() {
     let t = Tmp::new();
     let cwd = t.path();
     let home = t.0.join("home");
     std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    std::fs::write(home.join(".claude/settings.json"), r#"{"model":"claude-sonnet-5"}"#).unwrap();
     t.write(
         ".claude/settings.local.json",
-        r#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"node \"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/hook.mjs\""}]}]}}"#,
+        r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"node \"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/hook.mjs\""}]}]}}"#,
     );
     let home_text = home.to_string_lossy().to_string();
     let r = rt_with(&cwd, env(&[("HOME", &home_text), ("USERPROFILE", &home_text)]));
@@ -2343,19 +2354,20 @@ fn admin_on_repairs_project_manifest_from_user_scope_claude_skill() {
 
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Installed or repaired hook manifests for: .claude."), "{out}");
-    let settings: Value = serde_json::from_str(&t.read(".claude/settings.local.json")).unwrap();
-    let command = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
-    let expected_launcher = jsp::join(&[
-        &home_text,
-        ".claude",
-        "skills",
-        "impeccable",
-        "scripts",
-        "impeccable",
-    ]);
-    let expected_command = format!("{} hook", quote_command_arg(&expected_launcher, cfg!(windows)));
-    assert_eq!(command, expected_command);
-    assert!(!command.contains("CLAUDE_PROJECT_DIR"), "{command}");
+    let user: Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+    assert_eq!(user["model"], "claude-sonnet-5");
+    let command = user["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+    assert_eq!(command, expected_user_claude_hook_command(&home_text));
+    let local: Value = serde_json::from_str(&t.read(".claude/settings.local.json")).unwrap();
+    assert!(local.get("hooks").is_none(), "stale project hook was not pruned: {local}");
+    assert_eq!(local["permissions"]["allow"], json!(["Bash(ls)"]));
+
+    // Once the project copy is gone, a second run leaves the user file alone.
+    let before = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+    let (again, _, code) = admin_run(&r, &["on"]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(), before);
 }
 
 #[test]
@@ -2364,10 +2376,8 @@ fn admin_on_repairs_shared_project_manifest_from_user_scope_claude_skill() {
     let cwd = t.path();
     let home = t.0.join("home");
     std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
-    t.write(
-        ".claude/settings.json",
-        r#"{"model":"claude-sonnet-5","hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"node \"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/hook.mjs\""}]}]}}"#,
-    );
+    let shared_original = r#"{"model":"claude-sonnet-5","hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"node \"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/hook.mjs\""}]}]}}"#;
+    t.write(".claude/settings.json", shared_original);
     t.write(
         ".claude/settings.local.json",
         r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node old/skills/impeccable/scripts/hook.mjs"}]}]}}"#,
@@ -2379,23 +2389,36 @@ fn admin_on_repairs_shared_project_manifest_from_user_scope_claude_skill() {
 
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("Installed or repaired hook manifests for: .claude."), "{out}");
-    let shared: Value = serde_json::from_str(&t.read(".claude/settings.json")).unwrap();
-    assert_eq!(shared["model"], "claude-sonnet-5");
-    let command = shared["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
-    let expected_launcher = jsp::join(&[
-        &home_text,
-        ".claude",
-        "skills",
-        "impeccable",
-        "scripts",
-        "impeccable",
-    ]);
-    let expected_command = format!("{} hook", quote_command_arg(&expected_launcher, cfg!(windows)));
-    assert_eq!(command, expected_command);
-    assert!(!command.contains("CLAUDE_PROJECT_DIR"), "{command}");
+    // The hook lands in the user's own settings, with the absolute launcher.
+    let user: Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+    let command = user["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+    assert_eq!(command, expected_user_claude_hook_command(&home_text));
     let local: Value = serde_json::from_str(&t.read(".claude/settings.local.json")).unwrap();
     assert!(local.get("hooks").is_none(), "local duplicate was not pruned: {local}");
     assert_eq!(local["permissions"]["allow"], json!(["Bash(ls)"]));
+}
+
+/// Regression: a user-scope repair must never write a home path into the
+/// committed, team-shared `.claude/settings.json`.
+#[test]
+fn admin_on_user_scope_repair_leaves_committed_settings_byte_unchanged() {
+    let t = Tmp::new();
+    let cwd = t.path();
+    let home = t.0.join("home");
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    let shared_original = "{\n  \"hooks\": {\"PostToolUse\": [{\"matcher\": \"Edit\", \"hooks\": [{\"type\": \"command\", \"command\": \"\\\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\\\" hook\"}]}]}\n}\n";
+    t.write(".claude/settings.json", shared_original);
+    let home_text = home.to_string_lossy().to_string();
+    let r = rt_with(&cwd, env(&[("HOME", &home_text), ("USERPROFILE", &home_text)]));
+
+    let (out, _, code) = admin_run(&r, &["on"]);
+
+    assert_eq!(code, 0, "{out}");
+    let shared = t.read(".claude/settings.json");
+    assert_eq!(shared, shared_original);
+    assert!(!shared.contains(&home_text), "home path leaked into the committed manifest: {shared}");
+    assert!(std::fs::read_to_string(home.join(".claude/settings.json")).unwrap().contains("impeccable"));
 }
 
 #[test]
