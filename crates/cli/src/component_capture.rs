@@ -11,6 +11,10 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 pub struct NativeComponentCapturer;
+/// Milliseconds since the epoch, for pinning a capture's clock.
+pub(crate) fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.)
+}
 fn hash(bytes: &[u8]) -> String {
     // The PNG module and review store use the same SHA-256; avoid a second hash contract.
     use sha2::{Digest, Sha256};
@@ -65,6 +69,7 @@ pub(crate) fn render_page(
     assembled: bool,
     check_fonts: bool,
     measure_raster: bool,
+    clock_ms: f64,
 ) -> Result<(Vec<u8>, Value), String> {
     let server = if assembled { snapshot.serve_assembled()? } else { snapshot.serve()? };
     let url = server.entry_url();
@@ -74,6 +79,7 @@ pub(crate) fn render_page(
         page.set_viewport(Viewport { width, height })
             .map_err(|e| e.message)?;
         page.set_reduced_motion(true).map_err(|e| e.message)?;
+        page.pin_clock(clock_ms).map_err(|e| e.message)?;
         page.begin_response_capture().map_err(|e| e.message)?;
         page.goto(&url, "networkidle0", Duration::from_secs(20))
             .map_err(|e| e.message)?;
@@ -104,12 +110,6 @@ pub(crate) fn render_page(
         let mut dependency_errors = std::collections::BTreeSet::new();
         for record in &evidence.responses {
             if record.url.starts_with("data:image/") {
-                continue;
-            }
-            if record.url == format!("{origin}/favicon.ico")
-                && record.status == Some(404.)
-                && snapshot.bytes("favicon.ico").is_none()
-            {
                 continue;
             }
             let Some(target) = record.url.strip_prefix(&origin) else {
@@ -195,6 +195,7 @@ pub(crate) fn render_page(
             proof["capturedDomSha256"] = json!(hash(captured_dom.as_str().unwrap().as_bytes()));
         }
         proof["fonts"] = fonts;
+        proof["clock"] = json!({"pinnedEpochMs": clock_ms.floor() as i64, "policy": "the page's Date starts at the pinned instant and advances in real time"});
         if let Some(coverage) = raster_coverage {
             proof["rasterCoverage"] = coverage;
         }
@@ -253,6 +254,9 @@ impl ComponentCapturer for NativeComponentCapturer {
             discovery::find_browser(&env).map_err(|e| format!("browser unavailable: {e:?}"))?;
         let mut browser = Browser::launch(&exe, &[], false).map_err(|e| e.message)?;
         let version = browser.version().map_err(|e| e.message)?;
+        // One instant for every view of this round, recorded in each proof, so a
+        // gate capture of an approved view can render the same time of day.
+        let clock_ms = now_ms();
         let result = (|| {
             let mut files = BTreeMap::new();
             let mut evidence = Vec::new();
@@ -308,7 +312,7 @@ impl ComponentCapturer for NativeComponentCapturer {
                     let (png, proof) = if let Some(saved) = cache.get(&cache_key) {
                         saved.clone()
                     } else {
-                        let captured = match render_page(&mut browser, snapshot, width, height, &c["box"], isolation.as_ref(), assembled, check_fonts, false) {
+                        let captured = match render_page(&mut browser, snapshot, width, height, &c["box"], isolation.as_ref(), assembled, check_fonts, false, clock_ms) {
                             Ok(captured) => captured,
                             Err(error) => {
                                 errors.push(format!("{id} {key}: {error}"));

@@ -18,12 +18,14 @@ use std::{
 pub struct CdpAssetRenderer {
     env: HashMap<String, String>,
     raster_coverage: Option<Value>,
+    clock_ms: Option<f64>,
 }
 impl CdpAssetRenderer {
     pub fn from_process_env() -> Self {
         Self {
             env: impeccable_common::process_env(),
             raster_coverage: None,
+            clock_ms: None,
         }
     }
     /// Also measure the share of the viewport images paint outside `exclude`
@@ -31,6 +33,11 @@ impl CdpAssetRenderer {
     /// any intervention, and record it as `rasterCoverage` on every receipt.
     pub fn measuring_raster_coverage(mut self, exclude: Value) -> Self {
         self.raster_coverage = Some(exclude);
+        self
+    }
+    /// Pin the page's clock (see `Page::pin_clock`) for every capture this renderer makes.
+    pub fn pinned_at(mut self, epoch_ms: f64) -> Self {
+        self.clock_ms = Some(epoch_ms);
         self
     }
 }
@@ -82,6 +89,9 @@ impl AssetRenderer for CdpAssetRenderer {
             .map_err(|e| e.message)?;
             page.set_reduced_motion(request.reduced_motion)
                 .map_err(|e| e.message)?;
+            if let Some(clock_ms) = self.clock_ms {
+                page.pin_clock(clock_ms).map_err(|e| e.message)?;
+            }
             page.begin_response_capture().map_err(|e| e.message)?;
             page.goto(&request.url, "load", Duration::from_secs(30))
                 .map_err(|e| e.message)?;
