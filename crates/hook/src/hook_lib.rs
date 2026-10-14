@@ -16,6 +16,9 @@ use impeccable_detect::config::{
     normalize_ignore_rule, normalize_ignore_value, normalize_ignore_value_entries, DetectionConfig,
     IgnoreValueEntry,
 };
+pub use impeccable_detect::config::{
+    match_configured_extension, merge_extensions, normalize_extension_entries, ExtensionEntry,
+};
 use impeccable_detect::design_system::{load_design_system_for_cwd, resolve_design_md_path, DesignSystem};
 use impeccable_detect::detect_text::{detect_text, TextOptions};
 use impeccable_detect::engines::{HtmlEngine, ScanOptions};
@@ -217,6 +220,8 @@ pub struct Runtime<'a> {
     /// The `HOOK_ADMIN_COMMAND` printed in the full footer
     /// (JS: `node '<abs>/hook-admin.mjs'`; here `'<self>' hooks`).
     pub hook_admin_command: String,
+    /// The engine as the printed commands spell it (`'<self>'`).
+    pub self_command: String,
     pub html: &'a dyn HtmlEngine,
     /// `process.platform === 'win32'` (command-arg quoting).
     pub win32: bool,
@@ -237,6 +242,7 @@ impl<'a> Runtime<'a> {
             env,
             impeccable_command,
             hook_admin_command: format!("{} hooks", quote_command_arg(self_cmd, win32)),
+            self_command: quote_command_arg(self_cmd, win32),
             html,
             win32,
             canonical_cache: std::cell::RefCell::new(HashMap::new()),
@@ -349,12 +355,6 @@ pub fn is_native_platform(platform: Option<&str>) -> bool {
 }
 
 // ── config ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExtensionEntry {
-    pub ext: String,
-    pub engine: String,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
@@ -561,81 +561,6 @@ pub fn merge_ignore_values(
         map_set(&mut map, ignore_value_entry_key(&entry), entry);
     }
     map.into_iter().map(|(_, e)| e).collect()
-}
-
-/// JS: template-extensions.mjs#normalizeExtensionEntries
-pub fn normalize_extension_entries(entries: &[Value]) -> Vec<ExtensionEntry> {
-    let mut out = Vec::new();
-    for entry in entries {
-        let (raw, is_string, engine_text) = match entry {
-            Value::String(s) => (Some(s.as_str()), true, false),
-            Value::Object(o) => (
-                match o.get("ext") {
-                    Some(Value::String(s)) => Some(s.as_str()),
-                    _ => None,
-                },
-                false,
-                o.get("engine") == Some(&Value::String("text".to_string())),
-            ),
-            _ => (None, false, false),
-        };
-        let Some(raw) = raw else { continue };
-        let mut ext = js::to_lower_case(js::trim(raw));
-        if ext.is_empty() {
-            continue;
-        }
-        if !ext.starts_with('.') {
-            ext = format!(".{ext}");
-        }
-        let engine = if !is_string && engine_text {
-            "text"
-        } else {
-            "html"
-        };
-        out.push(ExtensionEntry {
-            ext,
-            engine: engine.to_string(),
-        });
-    }
-    out
-}
-
-/// JS: template-extensions.mjs#mergeExtensions
-pub fn merge_extensions(existing: &[ExtensionEntry], incoming: &[Value]) -> Vec<ExtensionEntry> {
-    let mut map: Vec<(String, ExtensionEntry)> = Vec::new();
-    for e in existing {
-        map_set(&mut map, e.ext.clone(), e.clone());
-    }
-    for e in normalize_extension_entries(incoming) {
-        map_set(&mut map, e.ext.clone(), e);
-    }
-    map.into_iter().map(|(_, e)| e).collect()
-}
-
-/// JS: template-extensions.mjs#matchConfiguredExtension
-pub fn match_configured_extension<'a>(
-    file_path: &str,
-    extensions: &'a [ExtensionEntry],
-) -> Option<&'a ExtensionEntry> {
-    if extensions.is_empty() {
-        return None;
-    }
-    let name = js::to_lower_case(&jsp::basename(file_path));
-    if name.is_empty() {
-        return None;
-    }
-    let mut best: Option<&ExtensionEntry> = None;
-    for entry in extensions {
-        if utf16_len(&name) > utf16_len(&entry.ext)
-            && name.ends_with(entry.ext.as_str())
-            && best
-                .map(|b| utf16_len(&entry.ext) > utf16_len(&b.ext))
-                .unwrap_or(true)
-        {
-            best = Some(entry);
-        }
-    }
-    best
 }
 
 // ── cache ─────────────────────────────────────────────────────────────────
@@ -1632,6 +1557,8 @@ impl HookScanOptions {
             viewport: None,
             profile: None,
             rule_pack: None,
+            keep_consent_banners: false,
+            keep_overlays: false,
         }
     }
 }

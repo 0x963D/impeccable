@@ -37,8 +37,8 @@ impl RulePack for TestPack {
     }
 }
 
-const SOURCE: &str = ".card { border-left: 4px solid #6366f1; }\n";
-const PAGE: &str = "<!DOCTYPE html>\n<html><head><title>t</title><style>\n.card { border-left: 4px solid #6366f1; }\n</style></head>\n<body><div class=\"card\">A card</div></body></html>\n";
+const SOURCE: &str = ".card { border-left: 4px solid #6366f1; border-radius: 10px; }\n";
+const PAGE: &str = "<!DOCTYPE html>\n<html><head><title>t</title><style>\n.card { border-left: 4px solid #6366f1; border-radius: 10px; }\n</style></head>\n<body><div class=\"card\">A card</div></body></html>\n";
 
 fn ids(json: &str) -> Vec<String> {
     serde_json::from_str::<Vec<Value>>(json)
@@ -89,7 +89,7 @@ fn html_export_shape() {
 #[test]
 fn inline_ignores_option() {
     let waived =
-        ".card { /* impeccable-disable-line side-tab */ border-left: 4px solid #6366f1; }\n";
+        ".card { /* impeccable-disable-line side-tab */ border-left: 4px solid #6366f1; border-radius: 10px; }\n";
     assert!(ids(&detect_text_json(waived, "a.css", "{}")).is_empty());
     assert!(!ids(&detect_text_json(
         waived,
@@ -114,6 +114,27 @@ fn design_system_option_is_the_design_md_inputs() {
         "{with_ds:?}"
     );
     assert!(!ids(&detect_text_json(source, "a.css", "{}"))
+        .iter()
+        .any(|id| id == "design-system-font"));
+}
+
+#[test]
+fn design_system_font_var_fallback_reaches_the_detect_export() {
+    let source = "body { font-family: 'Plus Jakarta Sans', sans-serif; }\n";
+    let options = serde_json::json!({
+        "designSystem": {
+            "frontmatter": {
+                "typography": {
+                    "body": {
+                        "fontFamily": "var(--font-jakarta, 'Plus Jakarta Sans'), ui-sans-serif, sans-serif"
+                    }
+                }
+            }
+        }
+    })
+    .to_string();
+
+    assert!(!ids(&detect_text_json(source, "a.css", &options))
         .iter()
         .any(|id| id == "design-system-font"));
 }
