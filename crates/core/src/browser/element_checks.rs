@@ -877,7 +877,7 @@ fn layer_entry_fills(entry: &str) -> bool {
             || size == ["contain"]
             || size.iter().all(|t| *t == "auto" || (length_ok(t) && parse_float(t) > 0.0));
     }
-    let size_fills = size.is_empty() || size == ["cover"] || size.iter().all(|t| matches!(*t, "auto" | "100%"));
+    let size_fills = size.is_empty() || size == ["cover"] || size == ["contain"] || size.iter().all(|t| matches!(*t, "auto" | "100%"));
     size_fills
         && position.iter().all(|w| {
             w.ends_with('%') || matches!(*w, "left" | "right" | "top" | "bottom" | "center") || (length_ok(w) && parse_float(w) == 0.0)
@@ -9699,10 +9699,11 @@ mod tests {
             &[("backgroundColor", "rgb(255, 255, 255)"), ("background", &format!("rgb(255, 255, 255) {}", entry(black, full)))],
         );
         assert!(hits.is_empty(), "{hits:?}");
-        // Both readers take the same size as covering (review: `100% auto`):
+        // Both readers take the same size as covering (review: `100% auto`,
+        // and `contain`, which sizes a ratio-less gradient like `cover`):
         // an opaque light face drawn once at `100% auto` over a white colour
         // is read as the face, not left to the ring behind it.
-        for size in ["100% auto", "auto 100%", "auto"] {
+        for size in ["100% auto", "auto 100%", "auto", "contain"] {
             let tail = format!("no-repeat scroll 0% 0% / {size} padding-box border-box");
             let hits = run_with(
                 light,
