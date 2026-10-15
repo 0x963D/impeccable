@@ -485,7 +485,22 @@ fn bring_into_view(
     Some((moved, moved_clip))
 }
 
+/// Whether the second shot hides the candidate's `text-shadow` with its
+/// glyphs: only for outlined text (`text outline`, [`visual::text_outlined`]),
+/// whose zero-blur offset shadows draw the outline the glyphs are read in.
+/// Any other shadow is a halo the glyphs sit on, and stays in both shots.
+fn hides_shadow_with_glyphs(candidate: &Value, reasons: &[String]) -> bool {
+    candidate.get("routed").and_then(Value::as_str) == Some("text outline")
+        || reasons.iter().any(|r| r == "text outline")
+}
+
 /// The pixel pair for one candidate at `clip`: text painted, then hidden.
+/// Hiding takes the glyphs' fill and stroke, and keeps a `text-shadow` in
+/// both shots, so the glyphs are read over the halo a reader sees them on.
+/// Removing it repainted most of the clip (rhem.ai's `0 2px 12px` dark halo
+/// over a pale video frame), and the pass refused the box as repainted
+/// between captures. Outlined text is the exception
+/// ([`hides_shadow_with_glyphs`]).
 fn measure_candidate(
     page: &mut Page<'_>,
     candidate: &Value,
@@ -510,8 +525,9 @@ fn measure_candidate(
         .get("backgroundClipText")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let outlined = hides_shadow_with_glyphs(candidate, reasons);
     let apply_expr = format!(
-        r#"(({{ selector, match, token, backgroundClipText }}) => {{
+        r#"(({{ selector, match, token, backgroundClipText, outlined }}) => {{
     const el = ({PICK_CANDIDATE_JS})(selector, match);
     if (!el) return false;
     let style = document.getElementById('impeccable-visual-contrast-hide-style');
@@ -522,7 +538,6 @@ fn measure_candidate(
         '[data-impeccable-visual-contrast-target] {{',
         '  color: transparent !important;',
         '  -webkit-text-fill-color: transparent !important;',
-        '  text-shadow: none !important;',
         '  -webkit-text-stroke-color: transparent !important;',
         '}}',
         'text[data-impeccable-visual-contrast-target], tspan[data-impeccable-visual-contrast-target] {{',
@@ -532,14 +547,18 @@ fn measure_candidate(
         '[data-impeccable-visual-contrast-target][data-impeccable-bgclip-text="true"] {{',
         '  background-image: none !important;',
         '}}',
+        '[data-impeccable-visual-contrast-target][data-impeccable-outlined-text="true"] {{',
+        '  text-shadow: none !important;',
+        '}}',
       ].join('\n');
       document.head.appendChild(style);
     }}
     el.setAttribute('data-impeccable-visual-contrast-target', token);
     if (backgroundClipText) el.setAttribute('data-impeccable-bgclip-text', 'true');
+    if (outlined) el.setAttribute('data-impeccable-outlined-text', 'true');
     return true;
   }})({})"#,
-        json!({ "selector": selector, "match": candidate.get("match").cloned().unwrap_or(Value::Null), "token": token, "backgroundClipText": bgclip })
+        json!({ "selector": selector, "match": candidate.get("match").cloned().unwrap_or(Value::Null), "token": token, "backgroundClipText": bgclip, "outlined": outlined })
     );
     let applied = page.evaluate_value(&apply_expr)?;
     if applied.as_bool() != Some(true) {
@@ -553,6 +572,7 @@ fn measure_candidate(
         if (el.getAttribute('data-impeccable-visual-contrast-target') !== token) continue;
         el.removeAttribute('data-impeccable-visual-contrast-target');
         el.removeAttribute('data-impeccable-bgclip-text');
+        el.removeAttribute('data-impeccable-outlined-text');
       }}
     }})({})"#,
         json!({ "token": token })
@@ -663,6 +683,22 @@ fn rand_token() -> String {
 mod tests {
     use super::*;
     use impeccable_core::js::to_fixed;
+
+    /// A halo stays in both shots; an outline drawn by offset shadows is
+    /// the ink and goes with the glyphs.
+    #[test]
+    fn only_outlined_text_hides_its_shadow() {
+        let halo = vec!["text shadow".to_string(), "unread layer".to_string()];
+        assert!(!hides_shadow_with_glyphs(&json!({ "routed": "unread layer" }), &halo));
+        assert!(hides_shadow_with_glyphs(&json!({ "routed": "text outline" }), &["text shadow".to_string()]));
+        let outlined = vec!["text shadow".to_string(), "text outline".to_string()];
+        assert!(hides_shadow_with_glyphs(&json!({}), &outlined));
+        // The hide style no longer clears every shadow.
+        let src = include_str!("screenshot_contrast.rs");
+        let base_rule = src.split("'[data-impeccable-visual-contrast-target] {{',").nth(1).unwrap_or("");
+        let base_rule = base_rule.split("'}}',").next().unwrap_or("");
+        assert!(base_rule.contains("color: transparent") && !base_rule.contains("text-shadow"), "{base_rule}");
+    }
 
     /// A slotted element scrolls inside its host's shadow frame: bringing it
     /// into view records that frame, and the restore puts it back.

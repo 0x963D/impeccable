@@ -170,12 +170,23 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
         // surface that ends this walk: shadcn's `bg-background/95
         // backdrop-blur` sticky header. Its backdrop filter blocks nothing,
         // so it keeps the candidate under a reason no pass refuses.
+        //
+        // A fill from [`BACKDROP_NEAR_OPAQUE_ALPHA`] up shows at most a fifth
+        // of the blur, so the rendered pixels are mostly the panel's own and
+        // the pixel pass reads them as a reader does (smartbi.ca's header at
+        // 0.94, imageto3d.studio's glass tabs at 0.82). The sampled pass
+        // cannot model the blur, so it still refuses such a box, and the
+        // walk goes on past it to whatever the blur shows.
         let backdrop = dom.style(cur, "backdropFilter");
         if !backdrop.is_empty() && backdrop != "none" {
+            let near_opaque = parse_rgb_or_any(&dom.style(cur, "backgroundColor"))
+                .is_some_and(|bg| bg.alpha_or_one() >= BACKDROP_NEAR_OPAQUE_ALPHA);
             add(
                 &mut reasons,
                 if solid_bg.is_some() {
                     "backdrop filter under an opaque fill"
+                } else if near_opaque {
+                    BACKDROP_UNDER_NEAR_OPAQUE_FILL
                 } else {
                     "backdrop filter"
                 },
@@ -233,6 +244,16 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
     }
     reasons
 }
+
+/// The fill alpha from which a box's own colour, not what its backdrop
+/// filter paints under it, is most of what the box shows: at least four
+/// fifths of every pixel.
+pub const BACKDROP_NEAR_OPAQUE_ALPHA: f64 = 0.8;
+
+/// The reason a backdrop filter under a fill from
+/// [`BACKDROP_NEAR_OPAQUE_ALPHA`] up gives: the pixel pass reads it, the
+/// sampled pass does not.
+pub const BACKDROP_UNDER_NEAR_OPAQUE_FILL: &str = "backdrop filter under a near-opaque fill";
 
 /// Replaced boxes that paint a picture rather than a colour.
 const MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas"];
@@ -2151,6 +2172,7 @@ fn candidate_value(dom: &dyn Dom, el: ElId, tag: &str, direct: &str, rect: &Rect
                     | "blend mode"
                     | "filter"
                     | "backdrop filter"
+                    | BACKDROP_UNDER_NEAR_OPAQUE_FILL
                     | "background-clip text"
                     | "text outline"
             )
@@ -3259,6 +3281,7 @@ pub fn prepare_analysis(dom: &dyn Dom, candidate: &Value) -> Prepared {
                 | "blend mode"
                 | "filter"
                 | "backdrop filter"
+                | BACKDROP_UNDER_NEAR_OPAQUE_FILL
                 | "opacity stack"
                 | "text shadow"
                 | "unread layer"
@@ -3899,6 +3922,48 @@ mod tests {
         d.set_styles(header, &[("backgroundColor", "rgb(0, 0, 0)"), ("backdropFilter", "none"), ("display", "contents")]);
         let reasons = collect_visual_contrast_reasons(&d, p);
         assert!(reasons.iter().any(|r| r == "image background"), "{reasons:?}");
+    }
+
+    /// smartbi.ca's header (`rgba(18, 36, 44, 0.94)` with `blur(12px)`) and
+    /// imageto3d.studio's glass tabs (0.82 with `blur(24px)` over a photo):
+    /// the panel's own fill is most of every pixel, so the pixels read the
+    /// text, and the sampled pass, which cannot model the blur, does not.
+    #[test]
+    fn a_backdrop_filter_under_a_near_opaque_fill_is_read_by_the_pixels() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let wrap = d.add(Some(body), "div");
+        d.set_style(wrap, "backgroundImage", "url(\"/hero.jpg\")");
+        let header = d.add(Some(wrap), "header");
+        d.set_styles(header, &[("backgroundColor", "rgba(18, 36, 44, 0.94)"), ("backdropFilter", "blur(12px)")]);
+        let p = d.add(Some(header), "p");
+        d.add_text(p, "FR");
+        d.set_styles(p, &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("color", "rgba(255, 255, 255, 0.4)"), ("fontSize", "13px")]);
+        d.set_rect(p, 10.0, 10.0, 40.0, 16.0);
+        for alpha in ["0.94", "0.82", "0.8"] {
+            d.set_style(header, "backgroundColor", &format!("rgba(18, 36, 44, {alpha})"));
+            let reasons = collect_visual_contrast_reasons(&d, p);
+            assert!(reasons.iter().any(|r| r == BACKDROP_UNDER_NEAR_OPAQUE_FILL), "{alpha}: {reasons:?}");
+            // The walk goes on to the photo the blur shows.
+            assert!(reasons.iter().any(|r| r == "image background"), "{alpha}: {reasons:?}");
+            assert!(pixel_contrast_blocked(&reasons).is_none(), "{alpha}: {reasons:?}");
+            let candidate = json!({ "selector": "p", "reasons": reasons });
+            match prepare_analysis(&d, &candidate) {
+                Prepared::Early { early } => assert_eq!(
+                    early["reason"],
+                    format!("{BACKDROP_UNDER_NEAR_OPAQUE_FILL} needs screenshot pixels"),
+                    "{alpha}"
+                ),
+                other => panic!("{alpha}: {other:?}"),
+            }
+        }
+        // Under four fifths the blur is too much of what shows.
+        d.set_style(header, "backgroundColor", "rgba(18, 36, 44, 0.79)");
+        let reasons = collect_visual_contrast_reasons(&d, p);
+        assert_eq!(pixel_contrast_blocked(&reasons).as_deref(), Some("backdrop filter"), "{reasons:?}");
+        d.set_style(header, "backgroundColor", "rgba(0, 0, 0, 0)");
+        let reasons = collect_visual_contrast_reasons(&d, p);
+        assert_eq!(pixel_contrast_blocked(&reasons).as_deref(), Some("backdrop filter"), "{reasons:?}");
     }
 
     #[test]
