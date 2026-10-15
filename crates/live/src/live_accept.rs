@@ -809,8 +809,10 @@ fn handle_accept_unlocked(
     let Some(variant_content) = extract_variant(lines, &block, variant_num) else {
         return Err(format!("Variant {} not found", variant_num));
     };
-    let original_content = original_or_refuse(id, lines, &block, rs, re)
-        .ok_or_else(|| format!("{} Source not modified; finish the accept by hand.", ORIGINAL_MISSING))?;
+    // Accept writes the chosen variant, not the original; the original only
+    // tells the manual-edit buffer which edits the accept replaced. A wrapper
+    // without the slot therefore accepts normally (only discard needs it).
+    let original_content = extract_original(lines, &block).unwrap_or_default();
     let css_content = extract_css(lines, &block, id);
     let variant_text = variant_content.join("\n");
     let has_helper_attrs = variant_text.contains("data-impeccable-variant");
@@ -1148,8 +1150,8 @@ static INSERT_MODE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!(r#"data-impeccable-mode{ws}*={ws}*(?:"insert"|'insert')"#, ws = WS)).unwrap()
 });
 
-/// The original slot's content, or `None` (refuse, write nothing) when a
-/// wrapper that replaced an element has none (#875): restoring "nothing" there
+/// The original slot's content for discard, or `None` (refuse, write nothing)
+/// when a wrapper that replaced an element has none (#875): restoring "nothing" there
 /// deletes the element while reporting success. An insert wrapper
 /// (`data-impeccable-mode="insert"`) replaced nothing and legitimately has no
 /// slot, so it restores to nothing.
@@ -1425,15 +1427,14 @@ mod original_slot_tests {
     }
 
     #[test]
-    fn accept_without_an_original_slot_refuses_and_writes_nothing() {
+    fn accept_without_an_original_slot_still_accepts_the_variant() {
         let (dir, path, lines) = scratch("index.html", NO_ORIGINAL);
-        let err = handle_accept_unlocked("ab12cd34", "1", &lines, &path, None, None)
-            .err()
-            .unwrap();
+        let result = handle_accept_unlocked("ab12cd34", "1", &lines, &path, None, None);
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(err.starts_with("Original not found"), "{err}");
-        assert_eq!(out, NO_ORIGINAL.join("\n"));
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert!(out.contains("<h1 class=\"hero\">Bolder</h1>"), "{out}");
+        assert!(!out.contains("impeccable-variants-start"), "{out}");
     }
 
     #[test]

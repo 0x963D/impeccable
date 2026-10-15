@@ -45,9 +45,9 @@ export default [
       fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace(/ {8}<style data-impeccable-css="ab12cd34">[\s\S]*?<\/style>\n/, ''));
     },
   }),
-  // --- A hand-written wrapper without the original slot (#875): discard and
-  // accept refuse and leave the source untouched instead of deleting the
-  // element. An insert wrapper has no slot by design and still discards. ---
+  // --- A hand-written wrapper without the original slot (#875): discard
+  // refuses and leaves the source untouched instead of deleting the element;
+  // accept needs no original and writes the variant. An insert wrapper has no slot by design and still discards. ---
   ...['--discard', '--variant'].map(mode => A(`live-accept-html-no-original-${mode === '--discard' ? 'discard' : 'accept'}`, 'live-html',
     ['--id', ID, ...(mode === '--discard' ? [mode] : [mode, '1'])], {
       snap: ['index.html'],
