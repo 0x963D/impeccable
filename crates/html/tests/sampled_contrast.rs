@@ -647,6 +647,83 @@ fn a_repeat_held_in_a_custom_property_is_read() {
 }
 
 #[test]
+fn a_color_held_in_a_custom_property_after_the_image_is_the_fallback() {
+    let site = Site::new("var-color");
+    let root = ":root { --brand: #17150f; }";
+    // The color is the ground where the image does not provably cover the
+    // box, as a literal would be: the photo is not sampled.
+    for value in ["var(--brand)", "#17150f"] {
+        let css = format!(
+            "{root} .hero {{ background: url(light.png) no-repeat {value}; }} p {{ color: #fdfdfd; }}"
+        );
+        let found = site.contrast(&css, "<div class=hero><p>White copy</p></div>");
+        assert!(found.is_empty(), "{value}: {found:?}");
+    }
+    // A translucent texture composites over that color, not over the page.
+    for value in ["var(--brand)", "#17150f"] {
+        let css = format!(
+            "{root} .hero {{ background: url(cutout.png) {value}; }} p {{ color: #262421; }}"
+        );
+        let found = site.contrast(&css, "<div class=hero><p>Dark copy</p></div>");
+        assert!(sampled_on("cutout.png", &found), "{value}: {found:?}");
+    }
+    let css = ".hero { background: url(cutout.png); } p { color: #262421; }";
+    let found = site.contrast(css, "<div class=hero><p>Dark copy</p></div>");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn an_escaped_paren_in_a_file_name_opens_no_call() {
+    let site = Site::new("escaped-paren");
+    site.png("icon(1).png", 24, 24, LIGHT);
+    // The generator writes `url(icon\(1\).png)`: the keywords after it are
+    // still read, so the icon stays an icon over its fallback color.
+    let css = ".hero { background: #17150f url(\"icon(1).png\") no-repeat; } p { color: #fdfdfd; }";
+    let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
+    assert!(found.is_empty(), "{found:?}");
+    let css = ".hero { background: #17150f url(\"icon(1).png\"); } p { color: #fdfdfd; }";
+    let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
+    assert!(sampled_on("icon(1).png", &found), "{found:?}");
+}
+
+#[test]
+fn a_shifted_wash_does_not_tint_every_sample() {
+    let site = Site::new("wash-position");
+    let dark_text = "p { color: #262421; }";
+    // A wash that fills the box darkens the light image under the dark
+    // copy; shifted by a length it leaves part of the image untinted, and
+    // the walk gives up rather than tint what it cannot place.
+    for (layer, sampled) in [
+        ("center / 100% 100% no-repeat", true),
+        ("0 200px / 100% 100% no-repeat", false),
+        ("0 200px / 100% 100% repeat", true),
+    ] {
+        let css = format!(
+            ".hero {{ background: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.6)) {layer}, url(light.png); }} {dark_text}"
+        );
+        let found = site.contrast(&css, "<div class=hero><p>Dark copy</p></div>");
+        if sampled {
+            assert!(sampled_on("light.png", &found), "{layer}: {found:?}");
+        } else {
+            assert!(found.is_empty(), "{layer}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn a_boxless_wrapper_does_not_fade_the_text() {
+    let site = Site::new("contents-opacity");
+    // `display: contents` generates no box, so its opacity applies to
+    // nothing: white copy stays white on the dark image.
+    let css = ".hero { background: url(dark.png); } .wrap { display: contents; opacity: 0.2; } p { color: #fdfdfd; }";
+    let found = site.contrast(
+        css,
+        "<div class=hero><div class=wrap><p>Copy</p></div></div>",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
 fn faded_text_is_measured_as_seen() {
     let site = Site::new("opacity");
     let hero = ".hero { background: url(dark.png); }";

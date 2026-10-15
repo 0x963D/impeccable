@@ -266,13 +266,13 @@ fn parse_static_background_layers(value: &str) -> (String, String, String) {
     let mut repeats: Vec<String> = Vec::new();
     let mut sizes: Vec<String> = Vec::new();
     let mut positions: Vec<String> = Vec::new();
-    for layer in split_css_list(value) {
+    for layer in split_layers(value) {
         let mut repeat: Vec<String> = Vec::new();
         let mut size: Vec<String> = Vec::new();
         let mut position: Vec<String> = Vec::new();
         let mut var_token: Option<String> = None;
         let mut in_size = false;
-        let tokens: Vec<String> = split_css_tokens(&layer).iter().flat_map(|t| unglue(t)).collect();
+        let tokens: Vec<String> = split_tokens(&layer).iter().flat_map(|t| unglue(t)).collect();
         for raw in join_slashes(tokens) {
             let token: &str = match BG_IMAGE_CALL_RE.find(&raw) {
                 Some(call) => &raw[css_call_end(&raw, call.end() - 1)..],
@@ -365,7 +365,8 @@ fn join_slashes(tokens: Vec<String>) -> Vec<String> {
 /// `url(x.png)center/100% 100%no-repeat#111`. One whitespace token may
 /// then hold several components; they are cut apart where the tokenizer
 /// would start the next one: after a top-level `)`, after a `%`, and
-/// before a `#`. Quoted strings and the inside of a call are left alone.
+/// before a `#`. Quoted strings, the inside of a call, and an escaped
+/// character are left alone.
 fn unglue(token: &str) -> Vec<String> {
     let chars: Vec<char> = token.chars().collect();
     let starts_component =
@@ -374,41 +375,142 @@ fn unglue(token: &str) -> Vec<String> {
     let mut depth = 0usize;
     let mut quote: Option<char> = None;
     let mut start = 0;
-    for i in 0..chars.len() {
+    let mut i = 0;
+    while i < chars.len() {
         let ch = chars[i];
+        if ch == '\\' {
+            i += 2;
+            continue;
+        }
         if let Some(q) = quote {
-            if ch == q && chars.get(i.wrapping_sub(1)) != Some(&'\\') {
+            if ch == q {
                 quote = None;
             }
+            i += 1;
             continue;
         }
         match ch {
-            '"' | '\'' => {
-                quote = Some(ch);
-                continue;
-            }
-            '(' => {
-                depth += 1;
-                continue;
-            }
+            '"' | '\'' => quote = Some(ch),
+            '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if depth > 0 {
-            continue;
+        if depth == 0 && quote.is_none() {
+            if ch == '#' && i > start {
+                parts.push(chars[start..i].iter().collect());
+                start = i;
+            } else if matches!(ch, ')' | '%') && chars.get(i + 1).is_some_and(starts_component) {
+                parts.push(chars[start..=i].iter().collect());
+                start = i + 1;
+            }
         }
-        if ch == '#' && i > start {
-            parts.push(chars[start..i].iter().collect());
-            start = i;
-        } else if matches!(ch, ')' | '%') && chars.get(i + 1).is_some_and(starts_component) {
-            parts.push(chars[start..=i].iter().collect());
-            start = i + 1;
-        }
+        i += 1;
     }
     if start < chars.len() {
         parts.push(chars[start..].iter().collect());
     }
     parts
+}
+
+/// `split_css_list` and `split_css_tokens` as the layer parser needs them.
+/// The shared splitters keep the JS reading the recorded vectors pin, where
+/// a backslash is nothing special outside a string, so the generator's
+/// `url(icon\(1.png)` opens a second call that never closes and swallows
+/// every keyword after it. Here a backslash hides the character after it,
+/// as the tokenizer reads it.
+fn split_escaped(value: &str, boundary: impl Fn(char) -> bool) -> Vec<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' {
+            current.push(ch);
+            if let Some(next) = chars.get(i + 1) {
+                current.push(*next);
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            current.push(ch);
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            current.push(ch);
+        } else if ch == '(' {
+            depth += 1;
+            current.push(ch);
+        } else if ch == ')' {
+            depth = depth.saturating_sub(1);
+            current.push(ch);
+        } else if depth == 0 && boundary(ch) {
+            let piece = js::trim(&current).to_string();
+            if !piece.is_empty() {
+                parts.push(piece);
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+        i += 1;
+    }
+    let piece = js::trim(&current).to_string();
+    if !piece.is_empty() {
+        parts.push(piece);
+    }
+    parts
+}
+
+fn split_layers(value: &str) -> Vec<String> {
+    split_escaped(value, |c| c == ',')
+}
+
+fn split_tokens(layer: &str) -> Vec<String> {
+    split_escaped(layer, js::is_js_whitespace)
+}
+
+/// A token that is one `var()` call and nothing else.
+fn is_bare_var(token: &str) -> bool {
+    VAR_HEAD_TOKEN_RE.is_match(token)
+        && token
+            .find('(')
+            .is_some_and(|open| css_call_end(token, open) == token.len())
+}
+
+static BG_ATTACHMENT_OR_BOX_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^(?:fixed|scroll|local|border-box|padding-box|content-box)$")
+        .expect("BG_ATTACHMENT_OR_BOX_RE")
+});
+
+/// Whether a value names background geometry rather than a color: repeat,
+/// position, or size tokens (with or without the size slash), attachment,
+/// or box keywords. What a shorthand's bare `var()` turned out to hold when
+/// the cascade stored it in the color slot too.
+pub fn names_background_geometry(value: &str) -> bool {
+    let tokens = join_slashes(split_tokens(value).iter().flat_map(|t| unglue(t)).collect());
+    !tokens.is_empty()
+        && tokens.iter().all(|token| {
+            // An unresolved `var()` is not geometry: the walk keeps its stop.
+            let geometry = |t: &str| {
+                !VAR_ANYWHERE_RE.is_match(t)
+                    && (BG_REPEAT_RE.is_match(t)
+                        || BG_POSITION_RE.is_match(t)
+                        || BG_SIZE_RE.is_match(t)
+                        || BG_ATTACHMENT_OR_BOX_RE.is_match(t))
+            };
+            match split_size_slash(token) {
+                Some((before, after)) => {
+                    (before.is_empty() || geometry(before)) && (after.is_empty() || geometry(after))
+                }
+                None => geometry(token),
+            }
+        })
 }
 
 /// The background color a shorthand names where `expand_static_declaration`
@@ -420,7 +522,7 @@ fn color_outside_image(v: &str) -> Option<String> {
     if !extract_static_color(&v[..first.start()]).is_empty() {
         return None;
     }
-    let layers = split_css_list(v);
+    let layers = split_layers(v);
     let last = layers.last()?;
     let (outside, color_only) = match BG_IMAGE_SPLIT_RE.find(last) {
         Some(call) => {
@@ -430,7 +532,21 @@ fn color_outside_image(v: &str) -> Option<String> {
         None => (last.clone(), true),
     };
     if VAR_ANYWHERE_RE.is_match(&outside) {
-        return None;
+        // One bare `var()` token beside the image may hold the color, the
+        // only slot the expansion never reads on this side; one glued to
+        // the size slash is the position, and one inside another function
+        // is not read. The compute loop resolves it, and the walk reads a
+        // repeat, position, or size it turns out to hold as no color at
+        // all. A whole final layer that is a `var()` stays what it was:
+        // unknown paint beneath the image, not its color.
+        let tokens = join_slashes(split_tokens(&outside).iter().flat_map(|t| unglue(t)).collect());
+        let bare: Vec<&String> = tokens.iter().filter(|t| is_bare_var(t)).collect();
+        let rest_plain = tokens
+            .iter()
+            .filter(|t| !is_bare_var(t))
+            .all(|t| !VAR_ANYWHERE_RE.is_match(t));
+        let named = !color_only && bare.len() == 1 && rest_plain;
+        return named.then(|| bare[0].clone());
     }
     let color = extract_static_color(&outside);
     // A final layer with no image is the color only when it is nothing else:
@@ -498,8 +614,8 @@ fn initial_or(v: &str, initial: &str) -> String {
 /// gradient: an image the engine does not read (`image-set("a.png" 1x)`,
 /// `element()`, `paint()`), with or without a `var()` inside.
 fn names_unread_image(v: &str) -> bool {
-    split_css_list(v).iter().any(|layer| {
-        split_css_tokens(layer)
+    split_layers(v).iter().any(|layer| {
+        split_tokens(layer)
             .iter()
             .any(|token| BG_IMAGE_CALL_RE.is_match(token))
     })

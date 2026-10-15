@@ -9,7 +9,7 @@ use crate::background::{
     a_ge, a_gt, find_image_ground, read_cascade_background_color, read_own_background_color,
     resolve_background,
     resolve_border_radius_px, resolve_side_accent_corners, resolve_text_gradient_stops,
-    resolve_text_surface, sv, sv_opt, CustomPropMap, ImageGround, TextSurface,
+    paints_no_box, resolve_text_surface, sv, sv_opt, CustomPropMap, ImageGround, TextSurface,
 };
 use crate::cascade::StyleValues;
 use crate::layer::picture_under_text;
@@ -1329,13 +1329,19 @@ fn sampled_image_contrast(
 /// that paints its image, in the shape `fold_opacity` takes: each box as
 /// the translucent fills it paints (top to bottom, from the walk's
 /// overlays) and its declared `opacity`, which scales the box's fills and
-/// text together, so every fill but the last of a box carries 1.
+/// text together, so every fill but the last of a box carries 1. A
+/// `display: contents` element has no box for its opacity to apply to and
+/// is read past, as the walk reads past its paint.
 fn fade_layers(el: &StaticElement<'_>, ground: &ImageGround) -> Vec<(Option<Rgba>, f64)> {
     let mut layers: Vec<(Option<Rgba>, f64)> = Vec::new();
     let mut cur = Some(*el);
     while let Some(c) = cur {
         if c.id() == ground.node {
             break;
+        }
+        if paints_no_box(c.style()) {
+            cur = c.parent_element();
+            continue;
         }
         let fills: Vec<Rgba> = ground
             .overlays

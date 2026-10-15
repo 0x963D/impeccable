@@ -164,19 +164,24 @@ fn repeat_axes(repeat: &str) -> (bool, bool) {
     }
 }
 
-/// Whether a gradient layer with this `background-repeat` and
-/// `background-size` paints the whole box, so that a uniform wash in it
-/// tints every sample. A gradient has no intrinsic size: `auto`, `cover`,
-/// and `contain` fill the box, a percentage from 100 up fills its axis, and
-/// any other length fills only where the layer tiles.
-pub fn wash_fills_box(repeat: &str, size: &str, font_size: f64) -> bool {
+/// Whether a gradient layer with this `background-repeat`,
+/// `background-size`, and `background-position` paints the whole box, so
+/// that a uniform wash in it tints every sample. A gradient has no
+/// intrinsic size: `auto`, `cover`, and `contain` fill the box, a
+/// percentage from 100 up fills its axis, and any other length fills only
+/// where the layer tiles. A position that can shift the layer off the box
+/// leaves part of it untinted unless the layer tiles along that axis.
+pub fn wash_fills_box(repeat: &str, size: &str, position: &str, font_size: f64) -> bool {
     let (repeat_x, repeat_y) = repeat_axes(repeat);
+    let in_box = position_stays_in_box(position);
     let size = size.trim().to_ascii_lowercase();
     let parts = size_components(&size);
     let fills = |token: Option<&str>, tiles: bool| match token.unwrap_or("auto") {
-        "auto" | "cover" | "contain" => true,
+        "auto" | "cover" | "contain" => tiles || in_box,
         token => {
-            tiles || matches!(size_token(token, font_size), SizeToken::Percent(p) if p >= 100.0)
+            tiles
+                || in_box
+                    && matches!(size_token(token, font_size), SizeToken::Percent(p) if p >= 100.0)
         }
     };
     fills(parts.first().copied(), repeat_x) && fills(parts.get(1).copied(), repeat_y)
@@ -507,19 +512,27 @@ mod tests {
 
     #[test]
     fn a_wash_tints_every_sample_only_where_it_fills_the_box() {
-        assert!(wash_fills_box("", "", 16.0));
-        assert!(wash_fills_box("no-repeat", "auto", 16.0));
-        assert!(wash_fills_box("no-repeat", "cover", 16.0));
-        assert!(wash_fills_box("no-repeat", "contain", 16.0));
-        assert!(wash_fills_box("no-repeat", "100% 100%", 16.0));
-        assert!(wash_fills_box("repeat", "20px 20px", 16.0));
-        assert!(wash_fills_box("repeat-x", "20px auto", 16.0));
+        assert!(wash_fills_box("", "", "", 16.0));
+        assert!(wash_fills_box("no-repeat", "auto", "", 16.0));
+        assert!(wash_fills_box("no-repeat", "cover", "", 16.0));
+        assert!(wash_fills_box("no-repeat", "contain", "", 16.0));
+        assert!(wash_fills_box("no-repeat", "100% 100%", "", 16.0));
+        assert!(wash_fills_box("repeat", "20px 20px", "", 16.0));
+        assert!(wash_fills_box("repeat-x", "20px auto", "", 16.0));
+        assert!(wash_fills_box("no-repeat", "cover", "center", 16.0));
+        assert!(wash_fills_box("no-repeat", "100% 100%", "0 0", 16.0));
+        // A shifted wash leaves part of the box untinted unless it tiles.
+        assert!(!wash_fills_box("no-repeat", "100% 100%", "0 200px", 16.0));
+        assert!(!wash_fills_box("no-repeat", "cover", "0 200px", 16.0));
+        assert!(!wash_fills_box("no-repeat", "auto", "calc(50% - 10px) 0", 16.0));
+        assert!(!wash_fills_box("repeat-x", "auto", "0 200px", 16.0));
+        assert!(wash_fills_box("repeat", "auto", "0 200px", 16.0));
         // A small patch, or one that tiles along one axis only, leaves
         // samples the wash does not reach.
-        assert!(!wash_fills_box("no-repeat", "20px 20px", 16.0));
-        assert!(!wash_fills_box("no-repeat", "50% auto", 16.0));
-        assert!(!wash_fills_box("repeat-x", "auto 2rem", 16.0));
-        assert!(!wash_fills_box("no-repeat", "var(--w)", 16.0));
+        assert!(!wash_fills_box("no-repeat", "20px 20px", "", 16.0));
+        assert!(!wash_fills_box("no-repeat", "50% auto", "", 16.0));
+        assert!(!wash_fills_box("repeat-x", "auto 2rem", "", 16.0));
+        assert!(!wash_fills_box("no-repeat", "var(--w)", "", 16.0));
     }
 
     #[test]

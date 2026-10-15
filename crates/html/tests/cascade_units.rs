@@ -483,7 +483,8 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "var(--tile)"),
             ("backgroundSize", "auto"),
-            ("backgroundPosition", "0% 0%")
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "var(--tile)")
         ])
     );
     assert_eq!(
@@ -494,15 +495,76 @@ fn background_longhands_ride_beside_the_expansion() {
             ("backgroundPosition", "0 200px")
         ])
     );
+    // The generator escapes a `(` in a file name; the escaped paren opens
+    // no call, so the keywords after it are still read, in one layer and
+    // across a list.
+    assert_eq!(
+        pairs("background", "url(icon\\(1.png) no-repeat #111"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "#111")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(a\\(1.png) no-repeat, url(b.png) center / cover"),
+        own(&[
+            ("backgroundRepeat", "no-repeat, repeat"),
+            ("backgroundSize", "auto, cover"),
+            ("backgroundPosition", "0% 0%, center")
+        ])
+    );
+    // A bare `var()` after the image is stored as the color too, the one
+    // slot the expansion never reads on that side; glued to the size slash
+    // it is the position, and inside another function it is not read.
+    assert_eq!(
+        pairs("background", "url(icon.png) no-repeat var(--brand)"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "var(--brand)")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(icon.png)var(--x)"),
+        own(&[
+            ("backgroundRepeat", "var(--x)"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "var(--x)")
+        ])
+    );
+    // A whole final layer that is a `var()` is unknown paint beneath the
+    // image, as before, not its color.
+    assert_eq!(
+        pairs("background", "url(a.png), var(--brand)"),
+        own(&[
+            ("backgroundRepeat", "repeat, var(--brand)"),
+            ("backgroundSize", "auto, auto"),
+            ("backgroundPosition", "0% 0%, 0% 0%")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(a.png) rgb(var(--r) 0 0)"),
+        own(&[
+            ("backgroundRepeat", "repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%")
+        ])
+    );
     // A bare `var()` in a shorthand may hold the repeat: it is stored as the
-    // repeat when no keyword names one and the compute loop resolves it. It
-    // is never read as a position, and a repeat keyword beside it wins.
+    // repeat when no keyword names one and the compute loop resolves it (and
+    // as the color, see above). It is never read as a position, and a
+    // repeat keyword beside it wins.
     assert_eq!(
         pairs("background", "url(icon.png) var(--repeat)"),
         own(&[
             ("backgroundRepeat", "var(--repeat)"),
             ("backgroundSize", "auto"),
-            ("backgroundPosition", "0% 0%")
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "var(--repeat)")
         ])
     );
     assert_eq!(
@@ -549,6 +611,24 @@ fn background_longhands_ride_beside_the_expansion() {
             ("backgroundPosition", "var(--pos)")
         ])
     );
+    // What the walk reads a resolved color slot as when the `var()` held
+    // geometry instead.
+    use impeccable_html::cascade::shorthand::names_background_geometry;
+    for geometry in [
+        "no-repeat",
+        "repeat-x",
+        "center",
+        "0 200px",
+        "center/cover",
+        "right top / 100% auto",
+        "fixed",
+        "border-box",
+    ] {
+        assert!(names_background_geometry(geometry), "{geometry}");
+    }
+    for color in ["#17150f", "rgb(0 0 0 / 50%)", "red", "url(a.png)", "", "var(--x)"] {
+        assert!(!names_background_geometry(color), "{color}");
+    }
     assert_eq!(
         pairs("background", "url(a.png) center /cover no-repeat"),
         own(&[
