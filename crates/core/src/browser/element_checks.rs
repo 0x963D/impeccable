@@ -2025,7 +2025,7 @@ pub fn check_element_colors_dom(
     // capture does not record: a browser's dark JSON viewer read as the white
     // canvas, a menu button's hidden white label in a white header. The full
     // pass keeps its own reading of the page ground.
-    let safe_tag_on_page_ground = same_hex && SAFE_TAGS.contains(&tag.as_str()) && on_page_ground(dom, surface_host);
+    let safe_tag_on_page_ground = same_hex && on_page_ground(dom, surface_host);
     // What the glyphs and their surface paint: a filter on a box that holds
     // the surface repaints both, and the verdicts read what it paints; one
     // the engine cannot model leaves none (`ink_paint`). The structural tests
@@ -2098,7 +2098,7 @@ pub fn check_element_colors_dom(
     };
     let (text_color, visible_text, effective_bg, effective_bg_stops, own_bg) = painted_colours
         .unwrap_or((text_color, visible_text, effective_bg, effective_bg_stops, own_bg));
-    let color_opts = ColorOpts {
+    let mut color_opts = ColorOpts {
         tag: tag.clone(),
         text_color,
         bg_color: own_bg,
@@ -2121,8 +2121,13 @@ pub fn check_element_colors_dom(
         visible_text,
         bg_source,
         bg_source_host,
-        same_color_surface_is_unread: same_color_surface_is_unread || safe_tag_on_page_ground,
+        same_color_surface_is_unread,
     };
+    // Only on the link and span path: a styled control takes the full pass,
+    // which keeps its own reading of the page ground.
+    if safe_tag_on_page_ground && crate::checks::rules::scores_safe_tag_text(&color_opts) {
+        color_opts.same_color_surface_is_unread = true;
+    }
     // A contrast verdict is about the surface the walk resolved. Where the
     // hit-test stacks say the text is covered at capture (a fixed banner over
     // it, a photo laid over an initial), or reads over paint the walk never
@@ -5453,8 +5458,8 @@ mod tests {
         d.set_running_animations(wrap, &[]);
         assert!(low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
         assert!(super::caught_mid_reveal(&d, word));
-        // Running, the loop is `loops_in_motion`'s; at rest at the same
-        // opacity, the row fades.
+        // Not paused, and with nothing recorded running, the row is at rest
+        // at 0.21 and fades.
         d.set_style(wrap, "animationPlayState", "running");
         assert!(!low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
         assert!(!super::caught_mid_reveal(&d, word));
@@ -5730,6 +5735,15 @@ mod tests {
         // the page's own that the stacks confirm, the `1.0:1` is real.
         let (d, _wrap, label) = muted_text_in_wrapper("span", "EN", "rgb(255, 255, 255)");
         assert!(colors(&d, label).is_empty(), "{:?}", colors(&d, label));
+        // A styled control on the page ground takes the full pass, which
+        // keeps its verdict where the stacks confirm the page.
+        let (mut d, _wrap, button) = muted_text_in_wrapper("a", "Start Chat", "rgb(255, 255, 255)");
+        d.set_style(button, "backgroundColor", "rgba(255, 255, 255, 0.6)");
+        assert!(
+            colors(&d, button).iter().any(|h| h.snippet.contains("#ffffff on #ffffff")),
+            "{:?}",
+            colors(&d, button)
+        );
         let (mut d, wrap, label) = muted_text_in_wrapper("a", "Start Chat", "rgb(255, 255, 255)");
         d.set_style(wrap, "backgroundColor", "rgb(255, 255, 255)");
         assert!(
