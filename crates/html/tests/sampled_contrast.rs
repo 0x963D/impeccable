@@ -585,6 +585,7 @@ fn a_shifted_image_is_not_known_to_cover_a_color() {
         ("right bottom / 100% 100% no-repeat", true),
         ("0 0 / 100% 100% no-repeat", true),
         ("0 200px / 100% 100% no-repeat", false),
+        ("150% 0 / cover no-repeat", false),
         ("center 4rem / cover no-repeat", false),
         ("calc(50% - 10px) 0 / cover no-repeat", false),
         ("0 200px / 100% 100% repeat", true),
@@ -603,6 +604,19 @@ fn a_shifted_image_is_not_known_to_cover_a_color() {
     let css = ".hero { background: #17150f url(light.png) center / 100% 100% no-repeat; background-position: 0 200px; } p { color: #fdfdfd; }";
     let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
     assert!(found.is_empty(), "{found:?}");
+    // A position held in a custom property directly before the size slash
+    // is read once the property resolves.
+    for (value, sampled) in [("center", true), ("0 200px", false)] {
+        let css = format!(
+            ":root {{ --pos: {value}; }} .hero {{ background: #17150f url(light.png) var(--pos) / 100% 100% no-repeat; }} p {{ color: #fdfdfd; }}"
+        );
+        let found = site.contrast(&css, "<div class=hero><p>White copy</p></div>");
+        if sampled {
+            assert!(sampled_on("light.png", &found), "{value}: {found:?}");
+        } else {
+            assert!(found.is_empty(), "{value}: {found:?}");
+        }
+    }
 }
 
 #[test]

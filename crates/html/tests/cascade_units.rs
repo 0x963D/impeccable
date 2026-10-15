@@ -531,6 +531,32 @@ fn background_longhands_ride_beside_the_expansion() {
             ("backgroundPosition", "calc(50% - 10px) bottom 1rem")
         ])
     );
+    // A `var()` directly before the size slash can only be the position,
+    // however the value was spaced; one standing alone is never read as it.
+    assert_eq!(
+        pairs("background", "url(a.png) var(--pos)/100% 100% no-repeat"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "100% 100%"),
+            ("backgroundPosition", "var(--pos)")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(a.png) var(--pos) / cover"),
+        own(&[
+            ("backgroundRepeat", "repeat"),
+            ("backgroundSize", "cover"),
+            ("backgroundPosition", "var(--pos)")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(a.png) center /cover no-repeat"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "cover"),
+            ("backgroundPosition", "center")
+        ])
+    );
     assert_eq!(
         pairs("background-position", "Center"),
         own(&[("backgroundPosition", "Center")])

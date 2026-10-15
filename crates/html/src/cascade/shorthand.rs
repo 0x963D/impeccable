@@ -260,6 +260,8 @@ fn size_component(token: &str) -> String {
 /// of collapsing to `auto`. A bare `var()` among the tokens may hold the
 /// repeat: it is stored as the repeat when no keyword names one, so the
 /// compute loop resolves it and an unresolved one is not read as tiling.
+/// One directly before the size slash can only be the position and is
+/// stored as that.
 fn parse_static_background_layers(value: &str) -> (String, String, String) {
     let mut repeats: Vec<String> = Vec::new();
     let mut sizes: Vec<String> = Vec::new();
@@ -270,7 +272,8 @@ fn parse_static_background_layers(value: &str) -> (String, String, String) {
         let mut position: Vec<String> = Vec::new();
         let mut var_token: Option<String> = None;
         let mut in_size = false;
-        for raw in split_css_tokens(&layer).iter().flat_map(|t| unglue(t)) {
+        let tokens: Vec<String> = split_css_tokens(&layer).iter().flat_map(|t| unglue(t)).collect();
+        for raw in join_slashes(tokens) {
             let token: &str = match BG_IMAGE_CALL_RE.find(&raw) {
                 Some(call) => &raw[css_call_end(&raw, call.end() - 1)..],
                 None => raw.as_str(),
@@ -283,7 +286,10 @@ fn parse_static_background_layers(value: &str) -> (String, String, String) {
             // is what follows the slash, one or two values; what precedes it
             // is the last position component.
             if let Some((before, after)) = split_size_slash(token) {
-                if !before.is_empty() && position.len() < 4 && BG_POSITION_RE.is_match(before) {
+                if !before.is_empty()
+                    && position.len() < 4
+                    && (BG_POSITION_RE.is_match(before) || VAR_HEAD_TOKEN_RE.is_match(before))
+                {
                     position.push(size_component(before));
                 }
                 in_size = true;
@@ -336,6 +342,23 @@ fn parse_static_background_layers(value: &str) -> (String, String, String) {
 
 static VAR_HEAD_TOKEN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^var\(").expect("VAR_HEAD_TOKEN_RE"));
+
+/// `center / cover`, `center/ cover`, and `center /cover` read as one
+/// `center/cover` token, so the slash branch sees the position before it
+/// and the size after it whichever way the value was spaced.
+fn join_slashes(tokens: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut pending = false;
+    for token in tokens {
+        if (pending || token.starts_with('/')) && !out.is_empty() {
+            out.last_mut().expect("non-empty").push_str(&token);
+        } else {
+            out.push(token);
+        }
+        pending = out.last().is_some_and(|last| last.ends_with('/'));
+    }
+    out
+}
 
 /// The css-tree generator writes no space where the tokenizer needs none,
 /// so a parsed `url(x.png) center / 100% 100% no-repeat #111` reads

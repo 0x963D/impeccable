@@ -183,14 +183,15 @@ pub fn wash_fills_box(repeat: &str, size: &str, font_size: f64) -> bool {
 }
 
 /// Whether a `background-position` keeps the image inside its box: edge and
-/// center keywords and percentages align the image to the box, a zero
-/// length is an edge. Any other length (`0 200px`), a `calc()`, or an
-/// unresolved `var()` can push the image out and expose what is under it.
+/// center keywords and percentages from 0 to 100 align the image to the
+/// box, a zero length is an edge. Any other length (`0 200px`), a
+/// percentage outside that range, a `calc()`, or an unresolved `var()` can
+/// push the image out and expose what is under it.
 fn position_stays_in_box(position: &str) -> bool {
     let position = position.trim().to_ascii_lowercase();
     size_components(&position).into_iter().all(|token| {
         matches!(token, "left" | "right" | "top" | "bottom" | "center")
-            || token.ends_with('%') && !parse_float(token).is_nan()
+            || token.ends_with('%') && (0.0..=100.0).contains(&parse_float(token))
             || parse_float(token) == 0.0 && !token.contains('(')
     })
 }
@@ -534,6 +535,8 @@ mod tests {
         assert!(!covers_at("no-repeat", "cover", "center 4rem"));
         assert!(!covers_at("no-repeat", "cover", "calc(50% - 10px) 0"));
         assert!(!covers_at("no-repeat", "cover", "var(--pos)"));
+        assert!(!covers_at("no-repeat", "cover", "150% 0"));
+        assert!(!covers_at("no-repeat", "cover", "0 -20%"));
         assert!(covers_at("repeat", "100% 100%", "0 200px"));
         assert!(!covers_at("repeat-x", "100% 100%", "0 200px"));
     }
