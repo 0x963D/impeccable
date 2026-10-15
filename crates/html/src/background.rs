@@ -15,7 +15,7 @@ use impeccable_core::checks::measures::{
     parse_radius_token_px, CustomProps, ROOT_FONT_SIZE_PX,
 };
 use impeccable_core::checks::rules::Corners;
-use impeccable_core::checks::sampled_contrast::uniform_wash;
+use impeccable_core::checks::sampled_contrast::{uniform_wash, wash_fills_box};
 use impeccable_core::color::{
     composite_color_over, is_no_paint_color_value, parse_any_color, parse_gradient_colors,
     parse_rgb, split_top_level_commas, Rgba,
@@ -279,9 +279,14 @@ fn gradient_tile_misses(style: &StyleValues, bg_image: &str, font_size: f64) -> 
     if !GRADIENT_RE.is_match(bg_image) || URL_CALL_RE.is_match(bg_image) {
         return false;
     }
-    let first_layer = split_top_level_commas(bg_image).into_iter().next().unwrap_or_default();
+    let first_layer = split_top_level_commas(bg_image)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let size = match js::trim(sv(style, "backgroundSize")) {
-        "" => geo::parse_shorthand_layer(&first_layer).size.unwrap_or_default(),
+        "" => geo::parse_shorthand_layer(&first_layer)
+            .size
+            .unwrap_or_default(),
         declared => declared.to_string(),
     };
     let repeat = geo::repeat_from(sv(style, "backgroundRepeat"), bg_image);
@@ -332,7 +337,9 @@ fn walk_surface(
             return out;
         }
         if has_gradient_or_url {
-            if q.font_size.is_some_and(|f| gradient_tile_misses(style, bg_image, f)) {
+            if q.font_size
+                .is_some_and(|f| gradient_tile_misses(style, bg_image, f))
+            {
                 out.skipped_images.push(cur.id());
                 current = cur.parent_element();
                 continue;
@@ -436,7 +443,11 @@ fn gradient_stops_walk(
             continue;
         }
         let skipped = (q.skip_image)(&cur);
-        let bg_image = if skipped { "none" } else { sv(style, "backgroundImage") };
+        let bg_image = if skipped {
+            "none"
+        } else {
+            sv(style, "backgroundImage")
+        };
         if !bg_image.is_empty() && bg_image != "none" && URL_CALL_RE.is_match(bg_image) {
             return None;
         }
@@ -857,6 +868,21 @@ pub struct ImageLayer {
     pub font_size: f64,
 }
 
+/// A `background-blend-mode` or `mix-blend-mode` other than `normal`:
+/// paint the sampler cannot reproduce. A CSS-wide keyword other than
+/// `inherit` is the initial value, `normal`.
+fn blends(mode: &str) -> bool {
+    !mode.is_empty()
+        && mode.split(',').any(|m| {
+            let m = js::trim(m);
+            !(m.eq_ignore_ascii_case("normal")
+                || m.eq_ignore_ascii_case("initial")
+                || m.eq_ignore_ascii_case("unset")
+                || m.eq_ignore_ascii_case("revert")
+                || m.eq_ignore_ascii_case("revert-layer"))
+        })
+}
+
 /// The paint of one element, in isolation from its ancestors.
 pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
     let style = cur.style();
@@ -865,12 +891,25 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
     if paints_no_box(style) {
         return LevelPaint::Through(Vec::new());
     }
+    // A `::before` or `::after` stretched over the element with a fill of
+    // its own covers whatever the element paints; the analytic path owns
+    // that surface.
+    if cur.doc.get_pseudo_surface(cur.id()).is_some() {
+        return LevelPaint::Stop;
+    }
+    // A blend changes what every pixel looks like in a way the sampler
+    // cannot reproduce.
+    if blends(sv(style, "backgroundBlendMode")) || blends(sv(style, "mixBlendMode")) {
+        return LevelPaint::Stop;
+    }
     let bg = level_background_color(cur, style, None);
     if bg.is_none() && !is_no_paint_color_value(sv_opt(style, "backgroundColor")) {
         return LevelPaint::Stop;
     }
     let color = bg.filter(|c| a_gt(c, 0.1));
     let bg_image = sv(style, "backgroundImage");
+    let font_size = js::parse_float(sv(style, "fontSize"));
+    let font_size = if font_size > 0.0 { font_size } else { 16.0 };
     let mut washes: Vec<Rgba> = Vec::new();
     if !bg_image.is_empty() {
         let spans = layer_spans(bg_image);
@@ -882,7 +921,8 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
             if let Some((name, open)) = top_level_call(bg_image, from, to, is_gradient_name) {
                 // An opaque gradient is the ground; a scrim that varies is
                 // placed under the text on purpose, and without layout the
-                // engine cannot say which stop the text sits on.
+                // engine cannot say which stop the text sits on. A wash that
+                // does not fill the box tints some samples and not others.
                 let call = &bg_image[name..css_call_end(bg_image, open)];
                 let Some(stops) = gradient_stops(call) else {
                     return LevelPaint::Stop;
@@ -893,6 +933,11 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
                 let Some(wash) = uniform_wash(&stops) else {
                     return LevelPaint::Stop;
                 };
+                let repeat = layer_entry(sv(style, "backgroundRepeat"), index);
+                let size = layer_entry(sv(style, "backgroundSize"), index);
+                if !wash_fills_box(&repeat, &size, font_size) {
+                    return LevelPaint::Stop;
+                }
                 washes.push(wash);
                 continue;
             }
@@ -913,7 +958,6 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
                     || rest.eq_ignore_ascii_case("none")
                     || (below == last && is_color_layer(rest)))
             });
-            let font_size = js::parse_float(sv(style, "fontSize"));
             return LevelPaint::Image(ImageLayer {
                 call,
                 repeat: layer_entry(sv(style, "backgroundRepeat"), index),
@@ -921,7 +965,7 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
                 washes,
                 color,
                 layers_beneath,
-                font_size: if font_size > 0.0 { font_size } else { 16.0 },
+                font_size,
             });
         }
     }
@@ -965,6 +1009,24 @@ pub struct ImageGround {
     pub over_opaque_color: bool,
 }
 
+/// What shows through a translucent image: the parent chain's ground as the
+/// analytic walk composites it, white at the root, unless an image on the
+/// way to the first opaque level hides that ground, which makes it unknown.
+fn parent_ground(cur: &StaticElement<'_>, levels: &LevelCache) -> Option<Rgba> {
+    let Some(parent) = cur.parent_element() else {
+        return Some(Rgba::new(255.0, 255.0, 255.0, 1.0));
+    };
+    let mut probe = Some(parent);
+    while let Some(p) = probe {
+        match &*levels.get(&p) {
+            LevelPaint::Image(_) => return None,
+            LevelPaint::Stop => break,
+            LevelPaint::Through(_) => probe = p.parent_element(),
+        }
+    }
+    resolve_background(&parent, None)
+}
+
 /// The walk the sampled path takes in place of [`resolve_background_info`]:
 /// up from the text to the first `url()` layer. `None` when an element on
 /// the way is one the analytic walk owns (see [`LevelPaint::Stop`]) or when
@@ -987,10 +1049,7 @@ pub fn find_image_ground(el: &StaticElement<'_>, levels: &LevelCache) -> Option<
                 } else if over_opaque_color {
                     layer.color
                 } else {
-                    let parent_ground = match cur.parent_element() {
-                        Some(p) => resolve_background(&p, None),
-                        None => Some(Rgba::new(255.0, 255.0, 255.0, 1.0)),
-                    };
+                    let parent_ground = parent_ground(&cur, levels);
                     match layer.color {
                         Some(c) => parent_ground.map(|p| composite_color_over(&c, &p)),
                         None => parent_ground,
@@ -1222,6 +1281,23 @@ mod tests {
             ),
             // No image anywhere.
             (".x { color: red; }", false, None),
+            // A blend the sampler cannot reproduce, a covering pseudo surface,
+            // and a wash that does not fill the box all give up.
+            (
+                ".x { background: #111 url(a.png) center / cover; background-blend-mode: multiply; }",
+                false,
+                None,
+            ),
+            (
+                "section { background: url(a.png); } .x { mix-blend-mode: multiply; }",
+                true,
+                None,
+            ),
+            (
+                ".x { background: linear-gradient(rgba(0,0,0,.4), rgba(0,0,0,.4)) 0 0 / 20px 20px no-repeat, url(a.png); }",
+                true,
+                None,
+            ),
             // A `display: contents` box paints nothing: its own image is not
             // a ground, and it does not hide the one behind it.
             (".x { display: contents; background: url(a.png); }", false, None),

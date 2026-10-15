@@ -358,9 +358,24 @@ pub fn background_longhands(prop: &str, value: &str) -> Vec<Expanded> {
     }
     match js::to_lower_case(prop).as_str() {
         "background" => background_shorthand_longhands(v),
-        "background-repeat" => vec![("backgroundRepeat".into(), v.to_string())],
-        "background-size" => vec![("backgroundSize".into(), v.to_string())],
+        "background-repeat" => vec![("backgroundRepeat".into(), initial_or(v, "repeat"))],
+        "background-size" => vec![("backgroundSize".into(), initial_or(v, "auto"))],
+        // Not part of the shorthand, so it is never reset by one; the
+        // sampled-contrast path stands down on any mode but `normal`.
+        "background-blend-mode" => vec![("backgroundBlendMode".into(), v.to_string())],
         _ => Vec::new(),
+    }
+}
+
+/// `initial`, `unset`, and `revert` are the property's initial value for
+/// these non-inherited longhands; `inherit` is left for the compute loop.
+fn initial_or(v: &str, initial: &str) -> String {
+    if !CSS_WIDE_KEYWORD_RE.is_match(v) {
+        v.to_string()
+    } else if v.eq_ignore_ascii_case("inherit") {
+        "inherit".to_string()
+    } else {
+        initial.to_string()
     }
 }
 
@@ -385,10 +400,9 @@ fn background_shorthand_longhands(v: &str) -> Vec<Expanded> {
         return Vec::new();
     }
     if CSS_WIDE_KEYWORD_RE.is_match(v) {
-        let keyword = js::to_lower_case(v);
         return vec![
-            ("backgroundRepeat".into(), keyword.clone()),
-            ("backgroundSize".into(), keyword),
+            ("backgroundRepeat".into(), initial_or(v, "repeat")),
+            ("backgroundSize".into(), initial_or(v, "auto")),
         ];
     }
     let (repeat, size) = parse_static_background_layers(v);

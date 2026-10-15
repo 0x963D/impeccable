@@ -398,6 +398,24 @@ fn background_longhands_ride_beside_the_expansion() {
             ("backgroundSize", "inherit")
         ])
     );
+    // `initial`, `unset`, and `revert` are the longhands' initial values;
+    // `inherit` is for the compute loop.
+    assert_eq!(
+        pairs("background-repeat", "initial"),
+        own(&[("backgroundRepeat", "repeat")])
+    );
+    assert_eq!(
+        pairs("background-size", "UNSET"),
+        own(&[("backgroundSize", "auto")])
+    );
+    assert_eq!(
+        pairs("background", "revert"),
+        own(&[("backgroundRepeat", "repeat"), ("backgroundSize", "auto")])
+    );
+    assert_eq!(
+        pairs("background-blend-mode", "multiply, screen"),
+        own(&[("backgroundBlendMode", "multiply, screen")])
+    );
     assert!(pairs("background", "var(--surface)").is_empty());
     assert!(pairs("background-color", "red").is_empty());
     assert!(pairs("color", "red").is_empty());

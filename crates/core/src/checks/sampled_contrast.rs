@@ -10,7 +10,7 @@
 //! paints, the wash and compositing rules, the percentile verdict and its
 //! label. Reading and decoding the image is the html crate's job.
 
-use crate::checks::rules::{scores_safe_tag_text, ColorOpts, RuleHit};
+use crate::checks::rules::{contrast_severity, scores_safe_tag_text, ColorOpts, RuleHit};
 use crate::color::{color_to_hex, composite_color_over, contrast_ratio, Rgba};
 use crate::constants::{WCAG_LARGE_BOLD_TEXT_PX, WCAG_LARGE_TEXT_PX};
 use crate::js::{number_to_string, parse_float, to_fixed};
@@ -133,6 +133,41 @@ fn size_components(value: &str) -> Vec<&str> {
     parts
 }
 
+/// Whether a layer tiles along each axis, from its `background-repeat`
+/// entry. `space` and `round` tile too. Anything else (an unresolved
+/// `var()`, a typo) is not known to repeat; no declaration is `repeat`.
+fn repeat_axes(repeat: &str) -> (bool, bool) {
+    let repeat = repeat.trim().to_ascii_lowercase();
+    let tokens: Vec<&str> = repeat.split_whitespace().collect();
+    let tiles = |token: &str| matches!(token, "repeat" | "space" | "round");
+    match tokens.as_slice() {
+        [] => (true, true),
+        ["repeat-x"] => (true, false),
+        ["repeat-y"] => (false, true),
+        [both] => (tiles(both), tiles(both)),
+        [x, y] => (tiles(x), tiles(y)),
+        _ => (false, false),
+    }
+}
+
+/// Whether a gradient layer with this `background-repeat` and
+/// `background-size` paints the whole box, so that a uniform wash in it
+/// tints every sample. A gradient has no intrinsic size: `auto`, `cover`,
+/// and `contain` fill the box, a percentage from 100 up fills its axis, and
+/// any other length fills only where the layer tiles.
+pub fn wash_fills_box(repeat: &str, size: &str, font_size: f64) -> bool {
+    let (repeat_x, repeat_y) = repeat_axes(repeat);
+    let size = size.trim().to_ascii_lowercase();
+    let parts = size_components(&size);
+    let fills = |token: Option<&str>, tiles: bool| match token.unwrap_or("auto") {
+        "auto" | "cover" | "contain" => true,
+        token => {
+            tiles || matches!(size_token(token, font_size), SizeToken::Percent(p) if p >= 100.0)
+        }
+    };
+    fills(parts.first().copied(), repeat_x) && fills(parts.get(1).copied(), repeat_y)
+}
+
 /// What a layer with this `background-repeat` and `background-size` (the
 /// layer's own comma-list entries) paints along each axis, given the image's
 /// intrinsic size and the element's font size for `em`.
@@ -143,20 +178,7 @@ pub fn layer_extents(
     intrinsic_h: f64,
     font_size: f64,
 ) -> (Extent, Extent) {
-    let repeat = repeat.trim().to_ascii_lowercase();
-    let tokens: Vec<&str> = repeat.split_whitespace().collect();
-    // `space` and `round` tile the axis too. Anything else (an unresolved
-    // `var()`, a typo) is not known to repeat.
-    let tiles = |token: &str| matches!(token, "repeat" | "space" | "round");
-    let (repeat_x, repeat_y) = match tokens.as_slice() {
-        // No declaration: the initial value is `repeat`.
-        [] => (true, true),
-        ["repeat-x"] => (true, false),
-        ["repeat-y"] => (false, true),
-        [both] => (tiles(both), tiles(both)),
-        [x, y] => (tiles(x), tiles(y)),
-        _ => (false, false),
-    };
+    let (repeat_x, repeat_y) = repeat_axes(repeat);
     let size = size.trim().to_ascii_lowercase();
     let sized = |token: SizeToken| match token {
         SizeToken::Px(v) => Extent::Px(v),
@@ -304,7 +326,7 @@ pub fn sampled_contrast(
     } else {
         to_fixed(measured, 1)
     };
-    Some(Sampled::Fail(RuleHit::new(
+    let mut hit = RuleHit::new(
         "low-contrast",
         format!(
             "sampled (coarse) {}:1 (need {}:1) — text {} on {}; p90 of {} samples, median {}:1",
@@ -315,7 +337,10 @@ pub fn sampled_contrast(
             n,
             to_fixed(median, 1)
         ),
-    )))
+    );
+    // Just under the bar is advisory here as it is for the analytic pair.
+    hit.severity = contrast_severity(measured, threshold);
+    Some(Sampled::Fail(hit))
 }
 
 #[cfg(test)]
@@ -409,6 +434,23 @@ mod tests {
     }
 
     #[test]
+    fn a_wash_tints_every_sample_only_where_it_fills_the_box() {
+        assert!(wash_fills_box("", "", 16.0));
+        assert!(wash_fills_box("no-repeat", "auto", 16.0));
+        assert!(wash_fills_box("no-repeat", "cover", 16.0));
+        assert!(wash_fills_box("no-repeat", "contain", 16.0));
+        assert!(wash_fills_box("no-repeat", "100% 100%", 16.0));
+        assert!(wash_fills_box("repeat", "20px 20px", 16.0));
+        assert!(wash_fills_box("repeat-x", "20px auto", 16.0));
+        // A small patch, or one that tiles along one axis only, leaves
+        // samples the wash does not reach.
+        assert!(!wash_fills_box("no-repeat", "20px 20px", 16.0));
+        assert!(!wash_fills_box("no-repeat", "50% auto", 16.0));
+        assert!(!wash_fills_box("repeat-x", "auto 2rem", 16.0));
+        assert!(!wash_fills_box("no-repeat", "var(--w)", 16.0));
+    }
+
+    #[test]
     fn only_a_filled_box_covers() {
         assert!(covers("repeat", "auto"));
         assert!(covers("", ""));
@@ -474,6 +516,17 @@ mod tests {
             sampled_contrast(&opts(white, 16.0), "hero.png", &all_light[..20], 36),
             None
         );
+        // Just under the bar is advisory, as the analytic pair reports it;
+        // further under is the rule's own severity.
+        let gray = rgba(119.0, 119.0, 119.0, 1.0);
+        let on_white: Vec<Rgba> = vec![rgba(255.0, 255.0, 255.0, 1.0); 36];
+        let Some(Sampled::Fail(near)) =
+            sampled_contrast(&opts(gray, 16.0), "hero.png", &on_white, 36)
+        else {
+            panic!("#777 on white sits just under 4.5:1");
+        };
+        assert_eq!(near.severity.as_deref(), Some("advisory"));
+        assert_eq!(hit.severity, None);
         // Large text lowers the bar, and the snippet says so.
         let mid = rgba(150.0, 150.0, 150.0, 1.0);
         let on_mid: Vec<Rgba> = vec![mid; 36];

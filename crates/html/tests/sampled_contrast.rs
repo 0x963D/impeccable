@@ -166,6 +166,54 @@ fn a_label_replaced_by_its_image_is_not_measured() {
 }
 
 #[test]
+fn paint_the_sampler_cannot_reproduce_keeps_the_skip() {
+    let site = Site::new("unreadable-paint");
+    let body = "<div class=hero><p>White copy on a blended photo</p></div>";
+    // A dark colour multiplied under the light image paints dark: readable
+    // white copy, which sampling the image alone would fail.
+    let blended = ".hero { background: #111 url(light.png) center / cover; background-blend-mode: multiply; } \
+                   p { color: #fdfdfd; }";
+    assert!(site.contrast(blended, body).is_empty());
+    let mixed = ".hero { background: url(light.png); } .mix { mix-blend-mode: multiply; } p { color: #fdfdfd; }";
+    let found = site.contrast(
+        mixed,
+        "<div class=hero><div class=mix><p>White copy under a blended wrapper</p></div></div>",
+    );
+    assert!(found.is_empty(), "{found:?}");
+    // A wash tints every sample only where it fills the box: a 20px patch
+    // leaves ink readable outside it, a tiled one does not.
+    let patch = ".hero { background: linear-gradient(rgba(0,0,0,.6), rgba(0,0,0,.6)) 0 0 / 20px 20px no-repeat, url(light.png); } \
+                 p { color: #262421; }";
+    let found = site.contrast(patch, body);
+    assert!(found.is_empty(), "{found:?}");
+    let tiled = patch.replace("no-repeat", "repeat");
+    assert!(sampled_on("light.png", &site.contrast(&tiled, body)));
+    // A `::before` stretched over the host with an opaque fill covers the
+    // host's image for every descendant, not only for the host's own text.
+    let covered = ".hero { position: relative; background: url(light.png); } \
+                   .hero::before { content: \"\"; position: absolute; inset: 0; background: #111; } \
+                   .hero p { position: relative; color: #fdfdfd; }";
+    let found = site.contrast(
+        covered,
+        "<div class=hero><div class=copy><p>White copy above a dark pseudo surface</p></div></div>",
+    );
+    assert!(found.is_empty(), "{found:?}");
+    // A translucent texture inside a covered fallback colour composites
+    // over the covering image, unknown here, not over the colour.
+    let nested = ".hero { background: #111 url(light.png) center / cover; } .inner { background: url(cutout.png); } \
+                  p { color: #262421; }";
+    let found = site.contrast(
+        nested,
+        "<div class=hero><div class=inner><p>Ink on a texture inside a covered colour</p></div></div>",
+    );
+    assert!(found.is_empty(), "{found:?}");
+    // `background-repeat: initial` is `repeat`: the image fills the box and
+    // is read over its fallback colour.
+    let reset = ".hero { background: #111 url(light.png); background-repeat: initial; } p { color: #fdfdfd; }";
+    assert!(sampled_on("light.png", &site.contrast(reset, body)));
+}
+
+#[test]
 fn a_scrim_with_a_keyword_stop_keeps_the_skip() {
     let site = Site::new("scrim");
     let body = "<div class=hero><p>Copy over a scrim</p></div>";
