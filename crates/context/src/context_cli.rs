@@ -313,11 +313,20 @@ fn append_resolved_context(parts: &mut Parts, ctx: &Ctx, options: &TargetOptions
 
 fn candidates_omitted(ctx: &Ctx, provider: &Provider) -> String {
     format!(
-        "{} candidates omitted for size; run `{} list \"{}\"` to see every persisted brief",
+        "{} candidates omitted for size; run `{} list {}` to see every persisted brief",
         ctx.surface_brief_candidates.len(),
         provider.verb_cmd("surface-brief"),
-        ctx.project_root
+        shell_arg(&ctx.project_root)
     )
+}
+
+/// One literal shell argument, quoted the way the launcher's own path is.
+fn shell_arg(value: &str) -> String {
+    if cfg!(windows) {
+        // cmd.exe treats single quotes as literal filename characters.
+        return format!("\"{}\"", value);
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn append_surface_brief_context(parts: &mut Parts, ctx: &Ctx, provider: &Provider) {
@@ -836,5 +845,11 @@ mod output_budget_tests {
         parts.push("DIRECTIVE_TAIL".into());
         let out = parts.render();
         assert_eq!(out, "# DESIGN.md\n\nsmall design\n\n---\n\nCANDIDATES: omitted\n\n---\n\nDIRECTIVE_TAIL\n");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn shell_arg_keeps_the_path_literal() {
+        assert_eq!(shell_arg("/work/$client/it's"), "'/work/$client/it'\\''s'");
     }
 }
