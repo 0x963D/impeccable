@@ -150,11 +150,14 @@ fn marked_signature(dom: &dyn Dom, el: ElId) -> bool {
     })
 }
 
-/// How much of its ink `el` shows: its effective opacity times its colour's
-/// alpha. A colour that does not parse counts as opaque.
+/// How much of its ink `el` shows once it settles: its effective opacity as
+/// the paint gates count it (a box a scroll timeline or a timed entrance
+/// holds at 0 at its end frame, [`super::painted::effective_opacity_scrolled`])
+/// times its colour's alpha. A heading caught mid-entrance is not a faint
+/// wordmark. A colour that does not parse counts as opaque.
 fn shown_opacity(dom: &dyn Dom, el: ElId) -> f64 {
     let ink = parse_rgb_or_any(&dom.style(el, "color")).map_or(1.0, |c| c.alpha_or_one());
-    super::element_checks::effective_opacity_dom(dom, el) * ink
+    super::painted::effective_opacity_scrolled(dom, el) * ink
 }
 
 /// The names the site goes by: its host name run together and without its
@@ -322,6 +325,33 @@ mod tests {
         d.set_style(mark, "color", "rgb(255, 255, 255)");
         d.set_style(footer, "opacity", "0.1");
         assert_eq!(decorative_text_shape_dom(&d, mark), Some(DecorativeShape::Wordmark));
+        // Caught at 0 by a timed entrance that settles at 1, it is the name
+        // in full ink, not a faint wordmark.
+        d.keyframes.insert(
+            "reveal".into(),
+            vec![
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0".into())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "1".into())] },
+            ],
+        );
+        d.keyframe_keys.insert("reveal".into(), vec!["0%".into(), "100%".into()]);
+        d.set_styles(
+            footer,
+            &[
+                ("opacity", "0"),
+                ("animationName", "reveal"),
+                ("animationIterationCount", "1"),
+                ("animationFillMode", "forwards"),
+                ("animationDirection", "normal"),
+                ("animationDuration", "0.6s"),
+                ("animationDelay", "1s"),
+                ("animationTimeline", "auto"),
+                ("animationPlayState", "running"),
+                ("animationComposition", "replace"),
+            ],
+        );
+        d.set_running_animations(footer, &["opacity"]);
+        assert_eq!(decorative_text_shape_dom(&d, mark), None);
         // A section name in the middle of a title is not the site's name,
         // and a hyphen separates nothing.
         d.add_text(title, " | Blog | Latest");
