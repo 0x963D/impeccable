@@ -313,9 +313,10 @@ fn append_resolved_context(parts: &mut Parts, ctx: &Ctx, options: &TargetOptions
 
 fn candidates_omitted(ctx: &Ctx, provider: &Provider) -> String {
     format!(
-        "{} candidates omitted for size; run `{} list` to see every persisted brief",
+        "{} candidates omitted for size; run `{} list \"{}\"` to see every persisted brief",
         ctx.surface_brief_candidates.len(),
-        provider.verb_cmd("surface-brief")
+        provider.verb_cmd("surface-brief"),
+        ctx.project_root
     )
 }
 

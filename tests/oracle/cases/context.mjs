@@ -237,6 +237,7 @@ const cases = [
   { id: 'context-bad-platform', verb: 'context', workspace: 'ctx-bad-platform', env: env(), files: IMPECCABLE_FILES },
   { id: 'context-monorepo-root', verb: 'context', workspace: 'ctx-monorepo', env: env(), files: IMPECCABLE_FILES },
   { id: 'context-monorepo-target-a', verb: 'context', workspace: 'ctx-monorepo', args: ['--target', 'apps/a/src/App.tsx'], env: env(), files: IMPECCABLE_FILES },
+  { id: 'context-monorepo-target-a-many-briefs', verb: 'context', workspace: 'ctx-monorepo', setup: (ws) => { for (let i = 0; i < 150; i++) write(ws, `apps/a/.impeccable/surfaces/route-page-${i}.md`, `---\nversion: 1\nslug: "route-page-${i}"\nprimary_target: "route:/page-${i}"\nrelated_targets: []\n---\n\n# Surface brief: Page ${i}\n`); }, args: ['--target', 'apps/a/src/App.tsx'], env: env() },
   { id: 'context-monorepo-target-b-inherits', verb: 'context', workspace: 'ctx-monorepo', args: ['--target', 'apps/b'], env: env(), files: IMPECCABLE_FILES },
   { id: 'context-monorepo-target-dot', verb: 'context', workspace: 'ctx-monorepo', args: ['--target', '.'], env: env(), files: IMPECCABLE_FILES },
   { id: 'context-monorepo-target-missing', verb: 'context', workspace: 'ctx-monorepo', args: ['--target', 'apps/zzz/src/App.tsx'], env: env(), files: IMPECCABLE_FILES },
