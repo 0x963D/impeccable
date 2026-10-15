@@ -1119,6 +1119,15 @@ pub fn region_source_issue(io: &Io, spec: &Value) -> Option<String> {
     Some(format!("region source {path} changed or is missing since measurement; fix it and re-run comp-spec --regions {path} before continuing"))
 }
 
+/// The comp's pixels, decoded from its own bytes first: `load_raster` may read
+/// a stale sibling PNG cache for a WebP or JPEG source, and both the spec and
+/// a crop must use (and identify) the pixels the approved-comp record and the
+/// spec's `compSha256` identify.
+fn read_comp(io: &Io, comp: &str) -> Result<Image, String> {
+    let own = std::fs::read(resolve(io, comp)).ok().and_then(|b| crate::approved_comp::decode_comp(&b));
+    own.map(Ok).unwrap_or_else(|| png_io::load_raster(&resolve(io, comp)).map(|(d, _)| d.image))
+}
+
 pub fn run(argv: &[String], io: &mut Io) -> i32 {
     let spec_path = arg_or(argv, "spec", SPEC_PATH).to_string();
     if flag(argv, "schema") {
@@ -1169,8 +1178,12 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
             return 1;
         };
         let comp_file = spec.get("comp").and_then(Value::as_str).unwrap_or("");
-        let comp = match png_io::load_raster(&resolve(io, comp_file)) {
-            Ok((d, _)) => d.image,
+        if let Some(why) = crate::approved_comp::issue_at(io, &spec, &spec_path, &crate::build_phase::self_cmd(io)) {
+            io.err(&format!("comp-spec: {why}\n"));
+            return 2;
+        }
+        let comp = match read_comp(io, comp_file) {
+            Ok(img) => img,
             Err(e) => {
                 io.err(&format!("comp-spec: cannot read {comp_file}: {e}\n"));
                 return 1;
@@ -1222,8 +1235,8 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
         io.err("usage: comp-spec.mjs --comp <png> (--grid | --regions <json> | --auto) [--spec out.json]\n       comp-spec.mjs --print | --crop <id> [--out file] [--scale n] | --plate-prompt <id>\n");
         return 1;
     };
-    let comp = match png_io::load_raster(&resolve(io, comp_path)) {
-        Ok((d, _)) => d.image,
+    let comp = match read_comp(io, comp_path) {
+        Ok(img) => img,
         Err(e) => {
             io.err(&format!("comp-spec: cannot read {comp_path}: {e}\n"));
             return 1;
@@ -1338,15 +1351,18 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
     let spec_out = resolve(io, &spec_path);
     // Bind cached font evidence to the decoded reference, including dimensions.
     // Legacy specs without this identity are deliberately remeasured once.
-    let mut hasher = Sha256::new();
-    hasher.update(comp.width.to_le_bytes());
-    hasher.update(comp.height.to_le_bytes());
-    hasher.update(&comp.data);
-    spec["compSha256"] = json!(format!("{:x}", hasher.finalize()));
+    let comp_hash = crate::approved_comp::pixel_sha256(&comp);
+    let previous = std::fs::read(&spec_out).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    // The approved comp is the fixed reference: re-measuring an edited copy of
+    // the build's comp would move the spec's identity along with the edit.
+    if let Some(why) = crate::approved_comp::spec_refusal(io, comp_path, &comp_hash, previous.as_ref(), &crate::build_phase::self_cmd(io)) {
+        io.err(&format!("comp-spec: {why}\n"));
+        return 2;
+    }
+    spec["compSha256"] = json!(comp_hash);
     spec["regionsSource"] = regions_source;
-    if let Some(previous) = std::fs::read(&spec_out).ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
-        preserve_typography(&mut spec, &previous);
+    if let Some(previous) = &previous {
+        preserve_typography(&mut spec, previous);
     }
     if let Some(parent) = spec_out.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1391,6 +1407,38 @@ mod reference_tests {
         assert_eq!(run(&["--schema".into()], &mut io),0);
     }
 
+
+    #[test]
+    fn crop_reads_the_comp_not_a_stale_png_cache() {
+        let dir = std::env::temp_dir().join(format!("impeccable-crop-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The source the spec measured: solid blue, as a GIF so load_raster
+        // would consult its sibling cache.
+        let blue = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255]));
+        let mut gif = Vec::new();
+        image::DynamicImage::ImageRgba8(blue)
+            .write_to(&mut std::io::Cursor::new(&mut gif), image::ImageFormat::Gif)
+            .unwrap();
+        std::fs::write(dir.join("comp.gif"), &gif).unwrap();
+        // A cache left from an earlier version of the comp: solid red.
+        let red = r::create_image(8, 8, [255, 0, 0, 255]);
+        std::fs::write(dir.join("comp.gif.png"), png_io::encode_png(&red, &[]).unwrap()).unwrap();
+        let mut io = Io::stdio();
+        io.cwd = dir.clone();
+        io.stdout = Box::new(Vec::<u8>::new());
+        io.stderr = Box::new(Vec::<u8>::new());
+        let hash = crate::approved_comp::file_pixel_sha256(&io, "comp.gif").unwrap();
+        let spec = json!({"comp":"comp.gif","compSha256":hash,"regions":[
+            {"id":"band","kind":"text","medium":"code","px":{"x":0,"y":0,"w":8,"h":8}}]});
+        std::fs::write(dir.join("spec.json"), spec.to_string()).unwrap();
+        let argv: Vec<String> = ["--crop", "band", "--spec", "spec.json", "--out", "crop.png"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(run(&argv, &mut io), 0);
+        let (crop, _) = png_io::load_raster(&dir.join("crop.png")).unwrap();
+        assert!(crop.image.data.chunks_exact(4).all(|px| px == [0, 0, 255, 255]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn automatic_snap_preserves_separated_navigation_and_multiline_copy() {

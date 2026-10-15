@@ -77,25 +77,46 @@ re!(
     NEUTRAL_RGB,
     format!(r"rgba?\(({D}+),{WS}*({D}+),{WS}*({D}+)")
 );
+/// A CSS `<number>` as Chrome serializes computed channels: an optional
+/// sign, digits with an optional point, and an optional exponent. Chrome
+/// writes a channel that rounds near zero as `-1.04907e-8`, which a bare
+/// `[0-9.]+` token cuts at the mantissa.
+const NUM: &str = r"[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?";
+/// [`NUM`] without a sign, for lightness, chroma and alpha.
+const UNUM: &str = r"(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?";
+
+// The neutral patterns are channel-delimited: they end every captured
+// channel (and its optional `%`) on white space, a slash or the closing
+// paren, and need white space (or a `%`) between channels, so a channel can
+// never be read from the tail of the one before it (`oklab(0.0999998 ...)`
+// once read `8` as `a`) or stop at an exponent's mantissa. A percentage
+// channel (valid authored CSS, never a computed value) is scaled to the
+// space's reference range before the threshold.
 re!(
     NEUTRAL_OKLCH,
-    format!(r"{}\({WS}*[0-9.]+%?{WS}*([0-9.\-]+)", ci("oklch"))
+    format!(
+        r"{}\({WS}*{UNUM}(?:%{WS}*|{WS}+)({NUM})(%?)(?:{WS}|/|\))",
+        ci("oklch")
+    )
 );
 re!(
     NEUTRAL_LCH,
-    format!(r"{}\({WS}*[0-9.]+%?{WS}*([0-9.\-]+)", ci("lch"))
+    format!(
+        r"{}\({WS}*{UNUM}(?:%{WS}*|{WS}+)({NUM})(%?)(?:{WS}|/|\))",
+        ci("lch")
+    )
 );
 re!(
     NEUTRAL_OKLAB,
     format!(
-        r"{}\({WS}*[0-9.]+%?{WS}*([0-9.\-]+){WS}+([0-9.\-]+)",
+        r"{}\({WS}*{UNUM}(?:%{WS}*|{WS}+)({NUM})(%?){WS}+({NUM})(%?)(?:{WS}|/|\))",
         ci("oklab")
     )
 );
 re!(
     NEUTRAL_LAB,
     format!(
-        r"{}\({WS}*[0-9.]+%?{WS}*([0-9.\-]+){WS}+([0-9.\-]+)",
+        r"{}\({WS}*{UNUM}(?:%{WS}*|{WS}+)({NUM})(%?){WS}+({NUM})(%?)(?:{WS}|/|\))",
         ci("lab")
     )
 );
@@ -128,20 +149,30 @@ pub fn is_neutral_color(color: Option<&str>) -> bool {
         let b = string_to_number(grp(&m, 3).unwrap());
         return (math_max3(r, g, b) - math_min3(r, g, b)) < 30.0;
     }
+    // A channel and its `%`, scaled so 100% is `full` (CSS Color 4's
+    // reference ranges).
+    let channel = |m: &regex::Captures, i: usize, full: f64| {
+        let v = parse_float(grp(m, i).unwrap());
+        if grp(m, i + 1) == Some("%") {
+            v / 100.0 * full
+        } else {
+            v
+        }
+    };
     if let Some(m) = caps(&NEUTRAL_OKLCH, color) {
-        return parse_float(grp(&m, 1).unwrap()) < 0.02;
+        return channel(&m, 1, 0.4) < 0.02;
     }
     if let Some(m) = caps(&NEUTRAL_LCH, color) {
-        return parse_float(grp(&m, 1).unwrap()) < 3.0;
+        return channel(&m, 1, 150.0) < 3.0;
     }
     if let Some(m) = caps(&NEUTRAL_OKLAB, color) {
-        let a = parse_float(grp(&m, 1).unwrap());
-        let b = parse_float(grp(&m, 2).unwrap());
+        let a = channel(&m, 1, 0.4);
+        let b = channel(&m, 3, 0.4);
         return math_hypot(&[a, b]) < 0.02;
     }
     if let Some(m) = caps(&NEUTRAL_LAB, color) {
-        let a = parse_float(grp(&m, 1).unwrap());
-        let b = parse_float(grp(&m, 2).unwrap());
+        let a = channel(&m, 1, 125.0);
+        let b = channel(&m, 3, 125.0);
         return math_hypot(&[a, b]) < 3.0;
     }
     if let Some(m) = caps(&NEUTRAL_HSL, color) {
@@ -200,6 +231,32 @@ pub fn contrast_ratio(c1: &Rgba, c2: &Rgba) -> f64 {
     let l1 = relative_luminance(c1);
     let l2 = relative_luminance(c2);
     (math_max(l1, l2) + 0.05) / (math_min(l1, l2) + 0.05)
+}
+
+/// A contrast ratio the way a snippet prints it next to its threshold. One
+/// decimal; two when one decimal would round a failing ratio up to the bar;
+/// and those two cut, not rounded, when rounding them would reach it too. A
+/// ratio under the bar never prints as the bar: 4.4983 against 4.5 prints
+/// `4.49`, where one decimal read `4.5` and two read `4.50`. A ratio at or
+/// above the bar, and a ratio one decimal already keeps under it, print one
+/// decimal as they always did.
+pub fn ratio_label(ratio: f64, threshold: f64) -> String {
+    let one = js::to_fixed(ratio, 1);
+    if !ratio.is_finite() || ratio < 0.0 || !(ratio < threshold) || string_to_number(&one) < threshold {
+        return one;
+    }
+    let two = js::to_fixed(ratio, 2);
+    if string_to_number(&two) < threshold {
+        return two;
+    }
+    // The exact decimal digits, cut after the second place. A double under
+    // the bar sits far enough below it that thirty places never carry into
+    // the second.
+    let exact = format!("{ratio:.30}");
+    match exact.split_once('.') {
+        Some((int_part, frac)) => format!("{int_part}.{}", &frac[..2]),
+        None => two,
+    }
 }
 
 // ─── Color-function token extraction ────────────────────────────────────────
@@ -351,8 +408,20 @@ pub fn lightness_saturation(c: &Rgba) -> (f64, f64) {
 /// ceiling, and 0.93 as lightness, which is where the eye puts it.
 pub fn is_gray_ink(c: &Rgba) -> bool {
     let (l, s) = lightness_saturation(c);
-    s < 0.2 && l > 0.2 && l < 0.85
+    s < 0.2 && l > GRAY_INK_MIN_LIGHTNESS && l < GRAY_INK_MAX_LIGHTNESS
 }
+
+/// The lightness at and over which a neutral ink is near-white, not gray.
+pub const GRAY_INK_MAX_LIGHTNESS: f64 = 0.85;
+
+/// The lightness at and under which a neutral ink is near-black, not gray.
+///
+/// `#393939` (0.22) on a yellow fill and `#413c38` (0.24) on a green one
+/// read at 6 to 8:1 as body ink, not as a washed-out gray. 0.3 is where the
+/// Tailwind neutrals split: every `-700` and darker (`gray-700` `#374151` at
+/// 0.27, `neutral-700` `#404040` at 0.25) is under it, every `-600` and
+/// lighter (`gray-600` `#4b5563` at 0.34) is over it.
+pub const GRAY_INK_MIN_LIGHTNESS: f64 = 0.3;
 
 /// JS `getHue(c)`.
 pub fn get_hue(c: Option<&Rgba>) -> f64 {
@@ -788,7 +857,7 @@ re!(ANY_HEX, r"^#([0-9a-fA-F]{3,8})$".to_string());
 re!(
     ANY_OKLCH,
     format!(
-        r"{}\({WS}*([0-9.]+)(%?){WS}*[{WSC},]*{WS}*([0-9.]+){WS}*[{WSC},]+{WS}*([\-0-9.]+)(?:{})?(?:{WS}*/{WS}*([0-9.]+)(%)?)?{WS}*\)",
+        r"{}\({WS}*({UNUM})(%?){WS}*[{WSC},]*{WS}*({UNUM}){WS}*[{WSC},]+{WS}*({NUM})(?:{})?(?:{WS}*/{WS}*({UNUM})(%)?)?{WS}*\)",
         ci("oklch"),
         ci("deg"),
         WSC = js::WS_CHARS
@@ -797,14 +866,14 @@ re!(
 re!(
     ANY_OKLAB,
     format!(
-        r"{}\({WS}*([0-9.]+)(%?){WS}+(-?[0-9.]+)(%?){WS}+(-?[0-9.]+)(%?)(?:{WS}*/{WS}*([0-9.]+)(%)?)?{WS}*\)",
+        r"{}\({WS}*({UNUM})(%?){WS}+({NUM})(%?){WS}+({NUM})(%?)(?:{WS}*/{WS}*({UNUM})(%)?)?{WS}*\)",
         ci("oklab")
     )
 );
 re!(
     ANY_LCH,
     format!(
-        r"^{}\({WS}*([0-9.]+%?|{none}){WS}+([0-9.]+%?|{none}){WS}+(-?[0-9.]+)(?:{deg})?(?:{WS}*/{WS}*([0-9.]+%?|{none}))?{WS}*\)$",
+        r"^{}\({WS}*({UNUM}%?|{none}){WS}+({UNUM}%?|{none}){WS}+({NUM})(?:{deg})?(?:{WS}*/{WS}*({UNUM}%?|{none}))?{WS}*\)$",
         ci("lch"),
         none = ci("none"),
         deg = ci("deg")
@@ -813,7 +882,7 @@ re!(
 re!(
     ANY_LAB,
     format!(
-        r"^{}\({WS}*([0-9.]+%?|{none}){WS}+(-?[0-9.]+%?|{none}){WS}+(-?[0-9.]+%?|{none})(?:{WS}*/{WS}*([0-9.]+%?|{none}))?{WS}*\)$",
+        r"^{}\({WS}*({UNUM}%?|{none}){WS}+({NUM}%?|{none}){WS}+({NUM}%?|{none})(?:{WS}*/{WS}*({UNUM}%?|{none}))?{WS}*\)$",
         ci("lab"),
         none = ci("none")
     )
@@ -1038,6 +1107,41 @@ pub fn is_no_paint_color_value(value: Option<&str>) -> bool {
 mod tests {
     use super::*;
 
+    /// Near-black ink on a colour is ink, not gray: `#393939` and `#413c38`
+    /// sit under the 0.3 floor, `gray-600` over it.
+    #[test]
+    fn near_black_is_not_gray_ink() {
+        let hex = |r: f64, g: f64, b: f64| Rgba::new(r, g, b, 1.0);
+        assert!(!is_gray_ink(&hex(57.0, 57.0, 57.0))); // #393939
+        assert!(!is_gray_ink(&hex(65.0, 60.0, 56.0))); // #413c38
+        assert!(!is_gray_ink(&hex(55.0, 65.0, 81.0))); // gray-700 #374151
+        assert!(is_gray_ink(&hex(75.0, 85.0, 99.0))); // gray-600 #4b5563
+        assert!(is_gray_ink(&hex(77.0, 77.0, 77.0))); // #4d4d4d
+        assert!(is_gray_ink(&hex(138.0, 143.0, 140.0))); // #8a8f8c
+    }
+
+    #[test]
+    fn a_failing_ratio_never_prints_as_its_bar() {
+        // context.dev: #777778 on #070709 is 4.4992:1, printed `4.50:1 (need 4.5:1)`.
+        let near = contrast_ratio(&Rgba::new(119.0, 119.0, 120.0, 1.0), &Rgba::new(7.0, 7.0, 9.0, 1.0));
+        assert!(near < 4.5 && near > 4.499);
+        assert_eq!(ratio_label(near, 4.5), "4.49");
+        // Two decimals already under the bar keep rounding, as they did.
+        assert_eq!(ratio_label(4.4861, 4.5), "4.49");
+        assert_eq!(ratio_label(4.4929, 4.5), "4.49");
+        assert_eq!(ratio_label(4.499_999_999_999_999, 4.5), "4.49");
+        assert_eq!(ratio_label(2.998, 3.0), "2.99");
+        assert_eq!(ratio_label(2.96, 3.0), "2.96");
+        // One decimal under the bar, at it, or above it: one decimal.
+        assert_eq!(ratio_label(4.44, 4.5), "4.4");
+        assert_eq!(ratio_label(1.7, 3.0), "1.7");
+        assert_eq!(ratio_label(4.5, 4.5), "4.5");
+        assert_eq!(ratio_label(4.62, 4.5), "4.6");
+        assert_eq!(ratio_label(18.4, 4.5), "18.4");
+        // No threshold to print against: one decimal.
+        assert_eq!(ratio_label(4.498, f64::NAN), "4.5");
+    }
+
     #[test]
     fn regexes_compile() {
         let _ = &*NEUTRAL_RGB;
@@ -1141,5 +1245,70 @@ mod tests {
         );
         assert_eq!(parse_any_color(Some("Constructor")), None);
         assert!(is_no_paint_color_value(None));
+    }
+
+    /// Chrome serializes a computed channel that rounds near zero with an
+    /// exponent (Tailwind v4's `bg-secondary/10` computes to
+    /// `oklab(0.6 -0.12 -1.04907e-8 / 0.1)`). Every pattern that reads
+    /// computed numbers takes the exponent; the value parses as the same
+    /// colour written out in full.
+    #[test]
+    fn computed_channels_with_exponents_parse() {
+        let same = |a: &str, b: &str| {
+            let x = parse_any_color(Some(a)).unwrap_or_else(|| panic!("{a} did not parse"));
+            let y = parse_any_color(Some(b)).unwrap_or_else(|| panic!("{b} did not parse"));
+            assert_eq!(x, y, "{a} against {b}");
+        };
+        same(
+            "oklab(0.6 -0.12 -1.04907e-8 / 0.1)",
+            "oklab(0.6 -0.12 -0.0000000104907 / 0.1)",
+        );
+        same("oklab(0.6 -0.12 1E-8)", "oklab(0.6 -0.12 0.00000001)");
+        same("oklab(1.2e-5 0 0)", "oklab(0.000012 0 0)");
+        same("oklch(0.6 1e-7 180)", "oklch(0.6 0.0000001 180)");
+        same("oklch(0.6 0.1 1.8e+2)", "oklch(0.6 0.1 180)");
+        same("oklch(0.6 0.1 180 / 5e-1)", "oklch(0.6 0.1 180 / 0.5)");
+        same("lab(50 -2.5e-6 30)", "lab(50 -0.0000025 30)");
+        same("lab(50 20 -3e-7 / 0.5)", "lab(50 20 -0.0000003 / 0.5)");
+        same("lch(50 1e-6 120)", "lch(50 0.000001 120)");
+        same("lch(50 30 -1.2e2)", "lch(50 30 -120)");
+        // The teal is teal, not the black a mantissa-only read would give.
+        let teal = parse_any_color(Some("oklab(0.6 -0.12 -1.04907e-8 / 0.1)")).unwrap();
+        assert!(teal.g > teal.r + 40.0, "{teal:?}");
+        // Plain decimals are unchanged.
+        same("oklab(0.5 0.1 -0.1)", "oklab(0.5 0.1 -0.1)");
+        assert!(parse_any_color(Some("oklab(0.5 0.1e -0.1)")).is_none());
+    }
+
+    /// The neutral test reads whole channels: a near-black whose `a` and `b`
+    /// carry exponents is neutral, and the lightness's last digit is never
+    /// read as `a`.
+    #[test]
+    fn neutral_channels_read_whole_numbers() {
+        let n = |s: &str| is_neutral_color(Some(s));
+        assert!(n("oklab(0.0999998 -9.79751e-7 0.00000233948 / 0.95)"));
+        assert!(n("oklab(0.5 1e-3 -2E-3)"));
+        assert!(!n("oklab(0.5 -1.2e-1 0.01)"));
+        assert!(n("oklch(0.6 1e-7 180)"));
+        assert!(!n("oklch(0.6 1.5e-1 180)"));
+        assert!(n("oklch(60% 0.01 180)"));
+        assert!(n("lab(50 -2.5e-6 1e-6)"));
+        assert!(!n("lab(50 2.5e1 1e-6)"));
+        assert!(n("lch(50 1e-6 120)"));
+        assert!(!n("lch(50 3e1 120)"));
+        // Percent chroma and a/b (authored CSS) scale to the reference
+        // range: 100% is 0.4 in oklch and oklab, 150 in lch, 125 in lab.
+        assert!(n("oklch(70% 0% 0)"));
+        assert!(n("lch(50% 0% 0)"));
+        assert!(n("lab(50 1% 1%)"));
+        assert!(n("oklab(50% 2% -1%)"));
+        assert!(!n("oklch(70% 40% 30)"));
+        assert!(!n("lch(50% 20% 30)"));
+        assert!(!n("oklab(50% 20% 0%)"));
+        // Decimals behave as before.
+        assert!(n("oklab(0.5 0.01 -0.01)"));
+        assert!(!n("oklab(0.5 0.1 -0.1)"));
+        assert!(!n("oklch(0.7 0.15 30)"));
+        assert!(n("lch(50 2 30)"));
     }
 }
