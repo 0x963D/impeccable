@@ -756,6 +756,23 @@ pub fn check_html_patterns_with(
 /// a `linear-gradient(rgb(14, 15, 18) 0%, rgb(14, 15, 18) 53%)` clipped to
 /// text is solid type. With no gradient function read in full, no.
 fn context_gradients_are_one_colour(context: &str) -> bool {
+    // The window opens 200 characters before the clip. A `)` with no `(`
+    // inside it closes a function that opened before the window: the
+    // declaration's own gradient, cut, whose stops cannot be read. Then a
+    // neighbouring one-colour gradient says nothing about it.
+    let mut depth = 0i32;
+    for c in context.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
     let lower = context.to_ascii_lowercase();
     let mut found = 0usize;
     let mut from = 0usize;
@@ -792,6 +809,24 @@ mod tests {
     use super::*;
 
     // Expected values come from running the JS functions in Node.
+
+    /// The stylesheet form reads every gradient in the clip's window: a
+    /// one-colour fill there is solid type, but a declaration whose own ramp
+    /// opened before the window is not read from a neighbour's fill.
+    #[test]
+    fn stylesheet_gradient_text_reads_one_colour_only_from_whole_gradients() {
+        assert!(context_gradients_are_one_colour(
+            "h2{background:linear-gradient(rgb(14, 15, 18) 0%, rgb(14, 15, 18) 53%);-webkit-background-clip:text}"
+        ));
+        assert!(!context_gradients_are_one_colour(
+            "h2{background:linear-gradient(90deg,#111,#f0f);-webkit-background-clip:text}"
+        ));
+        // Cut by the window: the tail of a ramp, then a neighbour's fill.
+        assert!(!context_gradients_are_one_colour(
+            "ba(236, 72, 153, 0.9) 60%, rgba(59, 130, 246, 1) 100%);-webkit-background-clip:text}.chip{background:linear-gradient(#fff,#fff)}"
+        ));
+        assert!(!context_gradients_are_one_colour("h2{-webkit-background-clip:text}"));
+    }
 
     /// freddiemac.com: a repeating gradient whose last stop sits at 100%, or
     /// has no position, draws its ramp once and never tiles.

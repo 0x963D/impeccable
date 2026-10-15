@@ -448,6 +448,28 @@ pub fn find_solid_chromatic_bg(s: &str) -> Option<&str> {
     None
 }
 
+/// The first chromatic fill utility that applies at rest
+/// ([`find_solid_chromatic_bg`]) and is not a pale tint: gray-on-color's
+/// class form. Every Tailwind hue at `-50` and `-100` sits at OKLCH
+/// lightness 0.93 or more with chroma under 0.07, the off-whites the
+/// computed form leaves out ([`background_reads_as_colour`]), so the class
+/// form leaves them out as well. `-200` and darker keep reading as colour.
+pub fn find_gray_on_color_bg(s: &str) -> Option<&str> {
+    let mut from = 0usize;
+    while let Some(m) = TW_COLOR_BG.find_at(s, from) {
+        let shade = m.as_str().rsplit('-').next().unwrap_or("");
+        if s.as_bytes().get(m.end()) != Some(&b'/')
+            && !in_state_variant(s, m.start())
+            && shade != "50"
+            && shade != "100"
+        {
+            return Some(m.as_str());
+        }
+        from = m.start() + 1;
+    }
+    None
+}
+
 /// The first gray text utility that applies at rest and is not near-black ink.
 fn find_resting_gray_text(s: &str) -> Option<regex::Match<'_>> {
     TW_GRAY_TEXT
@@ -847,7 +869,7 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
 
     if let Some(class_str) = opts.class_list.as_deref().filter(|s| !s.is_empty()) {
         let gray_match = find_resting_gray_text(class_str);
-        let color_bg_match = find_solid_chromatic_bg(class_str);
+        let color_bg_match = find_gray_on_color_bg(class_str);
         // A gray utility names the ink only when it wins the cascade, and a
         // custom scale may spell white with a gray name (hse.de's
         // `text-neutral-0`, rgb(255, 255, 255)). The browser computes the
@@ -2437,6 +2459,18 @@ mod tests {
         // At or above a luminance of 0.01 the bar is the old 40.
         assert!(background_reads_as_colour(&rgb(16.0, 185.0, 129.0)));
         assert!(!background_reads_as_colour(&rgb(120.0, 140.0, 150.0)));
+    }
+
+    /// The class form agrees with the computed one on Tailwind's pale tints.
+    #[test]
+    fn gray_on_color_class_form_leaves_pale_tints_out() {
+        assert_eq!(find_gray_on_color_bg("text-gray-500 bg-amber-100"), None);
+        assert_eq!(find_gray_on_color_bg("text-gray-500 bg-blue-50"), None);
+        assert_eq!(find_gray_on_color_bg("bg-sky-100 text-slate-500 md:bg-sky-600"), Some("bg-sky-600"));
+        assert_eq!(find_gray_on_color_bg("text-gray-500 bg-amber-200"), Some("bg-amber-200"));
+        assert_eq!(find_gray_on_color_bg("text-gray-500 bg-emerald-500/10"), None);
+        // The side-tab stripe-child reader still sees a pale fill.
+        assert_eq!(find_solid_chromatic_bg("bg-amber-100"), Some("bg-amber-100"));
     }
 
     /// glowcase.app 321836: grey-brown on cream reads as near-neutral.

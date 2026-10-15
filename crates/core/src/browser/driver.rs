@@ -2542,6 +2542,7 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     // One page, one set of already-reported SAFE_TAGS text colours.
     let mut color_seen = crate::checks::rules::SafeTagTextSeen::default();
     let mut vanishing_ink_candidates: std::collections::HashSet<ElId> = std::collections::HashSet::new();
+    let low_contrast_reported = !config.unreported_rules.iter().any(|r| r == "low-contrast");
     // The AI palette is read over the whole page: neon ink on a near-black
     // ground waits here until a second tell hue turns up somewhere, so one
     // deliberate accent stays an accent (REN-405).
@@ -2647,11 +2648,15 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         let findings: Vec<BrowserFinding> =
             findings.into_iter().filter(|f| rule_ok(&f.type_)).collect();
         // Only a low-contrast finding the element keeps speaks for its size
-        // findings: one the configuration turned off is gone by now, one an
-        // inline ignore drops is not counted, and a verdict handed to the
-        // pixel pass may be replaced there. The drop waits until the colour
+        // findings: one the configuration turned off is gone by now, one the
+        // host removes after the scan (the CLI's `ignoreRules` or `--scope`)
+        // or an inline ignore drops is not counted, and a verdict handed to
+        // the pixel pass may be replaced there. The drop waits until the colour
         // claims settle below, where a later copy can withdraw this one.
-        if !scoped_ignore_active(dom, el, "low-contrast") && super::visual::routed_reason(dom, el).is_none() {
+        if low_contrast_reported
+            && !scoped_ignore_active(dom, el, "low-contrast")
+            && super::visual::routed_reason(dom, el).is_none()
+        {
             vanishing_ink_candidates.insert(el);
         }
         add_browser_findings(dom, &mut groups, el, findings);
@@ -4070,7 +4075,7 @@ mod page_level_form_tests {
 
     /// vps.dance's `p.nid`: #eee on #f8f8f8 at 1.1:1, a size nobody sees.
     #[test]
-    fn size_findings_defer_to_a_low_contrast_finding_under_1_3() {
+    fn size_findings_defer_to_a_low_contrast_finding_under_1_25() {
         let run = |ratio: &str| {
             let mut findings = vec![
                 BrowserFinding::new("low-contrast", &format!("{ratio}:1 (need 4.5:1) — text #eeeeee on #f8f8f8")),
@@ -4119,6 +4124,16 @@ mod page_level_form_tests {
         };
         let off = ids(&collect_browser_findings(&d, &config), p);
         assert!(off.iter().any(|t| t == "tiny-text"), "{off:?}");
+        // The CLI reports low-contrast here and removes it afterwards
+        // (`ignoreRules`, a `--scope` without it): the size findings stand.
+        let config = BrowserConfig { unreported_rules: vec!["low-contrast".to_string()], ..BrowserConfig::default() };
+        let unreported = ids(&collect_browser_findings(&d, &config), p);
+        assert!(unreported.iter().any(|t| t == "low-contrast"), "{unreported:?}");
+        assert!(unreported.iter().any(|t| t == "tiny-text"), "{unreported:?}");
+        // Another rule left out of the report changes nothing.
+        let config = BrowserConfig { unreported_rules: vec!["overused-font".to_string()], ..BrowserConfig::default() };
+        let other = ids(&collect_browser_findings(&d, &config), p);
+        assert!(!other.iter().any(|t| t == "tiny-text"), "{other:?}");
     }
 
     /// A copy cut by the page's edge claims its colour pair until a copy
