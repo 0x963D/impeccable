@@ -184,7 +184,8 @@ fn collapse_ws(s: &str) -> String {
 /// Whether `el`'s text is the whole visible content of the link or button
 /// around it (or that it is): the control's text is `el`'s text, and nothing
 /// else in the control paints, neither a picture, an icon or an SVG, nor a box
-/// with a fill, a background image or a border (a hamburger's bars). Boxes
+/// with a fill, a background image or a border (a hamburger's bars). A box
+/// with no rendered area or at `visibility: hidden` paints nothing. Boxes
 /// that hold `el` do not count. Inside `el` (a link that owns its text
 /// beside an icon) a picture or an SVG counts, even one with a `<title>`,
 /// and so does any other box that paints and holds no text (a hamburger's
@@ -202,12 +203,14 @@ fn sole_visible_label_of_control(dom: &dyn Dom, el: ElId) -> bool {
     let is_picture =
         |n: ElId| matches!(tag_lower(dom, n).as_str(), "svg" | "img" | "picture" | "canvas" | "video" | "object" | "embed");
     let paints = |n: ElId| {
+        // A box with no rendered area, or one hidden, paints nothing, an
+        // icon left in the markup at `display: none` included.
+        let r = dom.rect(n);
+        if !(r.width > 0.0 && r.height > 0.0) || matches!(dom.style(n, "visibility").as_str(), "hidden" | "collapse") {
+            return false;
+        }
         if is_picture(n) || tag_lower(dom, n) == "i" {
             return true;
-        }
-        let r = dom.rect(n);
-        if !(r.width > 0.0 && r.height > 0.0) {
-            return false;
         }
         let fill = parse_rgb_or_any(&dom.style(n, "backgroundColor")).is_some_and(|c| c.alpha_or_one() > 0.1);
         let image = dom.style(n, "backgroundImage");
@@ -5833,7 +5836,13 @@ mod tests {
         assert!(!colors(&d, link).is_empty(), "{:?}", colors(&d, link));
         let icon = d.add(Some(link), "svg");
         visible(&mut d, icon);
+        // Left in the markup but not rendered, the icon paints nothing and
+        // the link's text is still its whole label.
+        assert!(!colors(&d, link).is_empty(), "{:?}", colors(&d, link));
         d.set_rect(icon, 96.0, 2.0, 16.0, 16.0);
+        d.set_style(icon, "visibility", "hidden");
+        assert!(!colors(&d, link).is_empty(), "{:?}", colors(&d, link));
+        d.set_style(icon, "visibility", "visible");
         assert!(colors(&d, link).is_empty(), "{:?}", colors(&d, link));
         // An SVG that names itself with a `<title>` is still the icon.
         let title = d.add(Some(icon), "title");
