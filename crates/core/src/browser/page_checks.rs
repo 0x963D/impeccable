@@ -3672,10 +3672,17 @@ fn buried_under_answer(dom: &dyn Dom, stack: &[ElId], victim: ElId) -> bool {
 
 /// The layer a curtain footer sits in: `el`'s nearest `sticky` or `fixed`
 /// ancestor (or `el` itself), when it sets a numeric `z-index` of 0 or below,
-/// which puts it under the page's later positioned layers. runlatent.ai's
-/// `footer#footer` is `position: sticky; bottom: 0; z-index: 0` under a
-/// `main` at `z-index: 1` with an opaque fill, so the page uncovers it as
-/// `main` scrolls away. `None` for `z-index: auto` or one not recorded.
+/// which puts it under the page's later positioned layers, and is anchored to
+/// the bottom of the window (computed `top: auto`, `bottom` a length): the
+/// page scrolls off it. runlatent.ai's `footer#footer` is `position: sticky;
+/// top: auto; bottom: 0; z-index: 0` under a `main` at `z-index: 1` with an
+/// opaque fill, so the page uncovers it as `main` scrolls away. A header
+/// pinned to the top at `z-index: 0` that the page lays over is buried for
+/// good, which is a collision, so it is no curtain. A browser resolves a
+/// fixed box's `top` to pixels whichever side it was anchored to, so a fixed
+/// layer never shows `top: auto` and is never taken: the capture cannot say
+/// which edge holds it. `None` for `z-index: auto`, a `top` that is set, or
+/// anything not recorded.
 fn curtain_layer(dom: &dyn Dom, el: ElId) -> Option<ElId> {
     let body = dom.body();
     let mut cur = Some(el);
@@ -3687,7 +3694,8 @@ fn curtain_layer(dom: &dyn Dom, el: ElId) -> Option<ElId> {
             let z = js::trim(&dom.style(c, "zIndex")).to_string();
             let n = parse_float(&z);
             let numeric = !z.is_empty() && z.bytes().all(|b| b.is_ascii_digit() || b == b'-');
-            return (numeric && n.is_finite() && n <= 0.0).then_some(c);
+            let bottom_anchored = dom.style(c, "top") == "auto" && dom.style(c, "bottom").ends_with("px");
+            return (numeric && n.is_finite() && n <= 0.0 && bottom_anchored).then_some(c);
         }
         cur = dom.parent(c);
     }
@@ -3699,9 +3707,11 @@ const CURTAIN_COVER_MIN_ALPHA: f64 = 0.95;
 
 /// Whether the hit-test stack at a point shows `victim`, inside the curtain
 /// layer `layer` ([`curtain_layer`]), under a box outside that layer that
-/// paints an opaque fill: the page laid over a curtain footer. Such a point
-/// shows the page, not the footer's words. `false` when no stack was
-/// recorded or the victim is not in it.
+/// paints an opaque fill and is painted at capture with every box up to the
+/// root at an opacity of 0.95 or more (a page block caught before its fade-in
+/// buries nothing): the page laid over a curtain footer. Such a point shows
+/// the page, not the footer's words. `false` when no stack was recorded or
+/// the victim is not in it.
 fn buried_under_the_page(dom: &dyn Dom, stack: &[ElId], victim: ElId, layer: ElId) -> bool {
     let Some(at) = stack.iter().position(|&e| e == victim) else {
         return false;
@@ -3711,6 +3721,8 @@ fn buried_under_the_page(dom: &dyn Dom, stack: &[ElId], victim: ElId, layer: ElI
             && !dom.contains(layer, box_)
             && parse_any_color(Some(&dom.style(box_, "backgroundColor")))
                 .is_some_and(|c| c.alpha_or_one() >= CURTAIN_COVER_MIN_ALPHA)
+            && painted_at_capture(dom, box_)
+            && effective_opacity_dom(dom, box_) >= CURTAIN_COVER_MIN_ALPHA
     })
 }
 
@@ -6086,7 +6098,7 @@ mod tests {
     /// page uncovers as it scrolls away, not text a reader sees collide.
     #[test]
     fn text_occlusion_skips_a_curtain_footer_the_page_covers() {
-        let run = |z: &str, page_fill: &str, footer_shows: bool| {
+        let run_full = |z: &str, page_fill: &str, footer_shows: bool, top: &str, bottom: &str, page_opacity: &str| {
             let mut d = FakeDom::new();
             let (_h, body) = d.with_page();
             d.inner_width = 390.0;
@@ -6094,6 +6106,7 @@ mod tests {
             let footer = d.add(Some(body), "footer");
             d.set_styles(footer, PROBE_BASE);
             d.set_styles(footer, &[("position", "sticky"), ("zIndex", z), ("backgroundColor", "rgb(43, 70, 249)")]);
+            d.set_styles(footer, &[("top", top), ("bottom", bottom)]);
             d.set_rect(footer, 0.0, 90.0, 390.0, 754.0);
             let privacy = d.add(Some(footer), "a");
             d.set_styles(privacy, PROBE_BASE);
@@ -6105,7 +6118,7 @@ mod tests {
             d.add_text(terms, "Terms");
             let main = d.add(Some(body), "main");
             d.set_styles(main, PROBE_BASE);
-            d.set_styles(main, &[("position", "relative"), ("zIndex", "1"), ("backgroundColor", page_fill)]);
+            d.set_styles(main, &[("position", "relative"), ("zIndex", "1"), ("backgroundColor", page_fill), ("opacity", page_opacity)]);
             // The page covers the whole footer, or stops short of its last
             // row, which then shows.
             d.set_rect(main, 0.0, 0.0, 390.0, if footer_shows { 780.0 } else { 13087.0 });
@@ -6136,6 +6149,10 @@ mod tests {
                 .filter(|s| s.contains("\"Privacy\"") || s.contains("\"Terms\"") || s.contains("\"Latent\""))
                 .collect::<Vec<_>>()
         };
+        let run_anchored = |z: &str, page_fill: &str, footer_shows: bool, top: &str, bottom: &str| {
+            run_full(z, page_fill, footer_shows, top, bottom, "1")
+        };
+        let run = |z: &str, page_fill: &str, footer_shows: bool| run_anchored(z, page_fill, footer_shows, "auto", "0px");
         // Both links: one under the page's heading, one under its fill;
         // and the wordmark, under the card.
         let base = run("auto", "rgb(10, 11, 16)", false);
@@ -6144,6 +6161,14 @@ mod tests {
         // Sticky at z-index 0, or below it: buried under the page.
         assert!(run("0", "rgb(10, 11, 16)", false).is_empty());
         assert!(run("-1", "rgb(10, 11, 16)", false).is_empty());
+        // The same layer pinned to the top (a header at `z-index: 0` that
+        // the page lays over) is buried for good, not uncovered by scrolling:
+        // its words collide. So does one whose anchoring was not recorded.
+        assert_eq!(run_anchored("0", "rgb(10, 11, 16)", false, "0px", "auto").len(), 3);
+        assert_eq!(run_anchored("0", "rgb(10, 11, 16)", false, "", "").len(), 3);
+        // A page block caught part way into its fade-in buries nothing: the
+        // footer shows through it.
+        assert!(!run_full("0", "rgb(10, 11, 16)", false, "auto", "0px", "0.5").is_empty());
         // Above the page, or under a page with no opaque fill, it collides.
         assert_eq!(run("2", "rgb(10, 11, 16)", false).len(), 3);
         let faint = run("0", "rgba(10, 11, 16, 0.5)", false);
