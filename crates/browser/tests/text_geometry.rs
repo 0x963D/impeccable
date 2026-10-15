@@ -365,11 +365,11 @@ fn viewport_edge_at_phone_width() {
     let (page, edges): (Vec<_>, Vec<_>) = edges.into_iter().partition(|(_, sel)| sel == "body");
     assert_cases(
         &edges,
-        &["flag-phone-8", "flag-phone-11"],
-        &["pass-phone-12", "pass-phone-14", "pass-phone-24", "past-wide-item"],
+        &["flag-phone-8", "flag-phone-11", "flag-header-first-screen"],
+        &["pass-phone-12", "pass-phone-14", "pass-phone-24", "past-wide-item", "pass-site-header"],
         "body-text-viewport-edge",
     );
-    assert_eq!(edges.len(), 2, "{edges:?}");
+    assert_eq!(edges.len(), 3, "{edges:?}");
     assert_eq!(page.len(), 1, "{page:?}");
     assert!(
         page[0].0.starts_with("text runs past the right edge of the 390px viewport and is cut off: ul.wide-list reaches 114px past it")
