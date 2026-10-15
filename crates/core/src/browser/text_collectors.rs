@@ -351,13 +351,13 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
         if is_kicker_card_context(dom, heading, label) || numbered_label_holds_media(dom, label) {
             continue;
         }
-        // A label or heading a visitor cannot see numbers nothing on screen:
-        // juskoe.vercel.app sets its 13px "01" to "03" in a `md:hidden`
-        // block, at `display: none` on desktop, beside headings that show.
-        // The same gate as the kicker collector's.
-        if unpainted_for(dom, heading, PaintGate::Text).is_some()
-            || unpainted_for(dom, label, PaintGate::Text).is_some()
-        {
+        // A label or heading the layout does not render numbers nothing on
+        // screen: juskoe.vercel.app sets its 13px "01" to "03" in a
+        // `md:hidden` block, at `display: none` on desktop, beside headings
+        // that show. Only that is asked, not the whole Text gate: a label at
+        // opacity 0 in a scroll-driven stage (v0-applestylescroll's sticky
+        // feature panels) is one a visitor scrolls into view.
+        if not_displayed(dom, heading) || not_displayed(dom, label) {
             continue;
         }
         let label_text = {
@@ -403,6 +403,27 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
         });
     }
     candidates
+}
+
+/// Whether `el` or an ancestor is `display: none`, or `content-visibility:
+/// hidden` on a box it applies to: the layout renders no box for it at any
+/// scroll position. A value the capture did not record renders.
+fn not_displayed(dom: &dyn Dom, el: ElId) -> bool {
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        let display = dom.style(c, "display");
+        if display == "none" {
+            return true;
+        }
+        if c != el
+            && super::dom::content_visibility_applies(&display)
+            && js::to_lower_case(&dom.style(c, "contentVisibility")) == "hidden"
+        {
+            return true;
+        }
+        cur = dom.parent(c);
+    }
+    false
 }
 
 /// The media that make a numbered label a picture rather than a section
@@ -942,10 +963,6 @@ mod tests {
             let h = d.add(Some(sec), "h2");
             d.add_text(h, &format!("Section number {}", i + 1));
             d.set_style(h, "fontSize", "28px");
-            // Measured on screen, which the paint gate asks.
-            let y = 100.0 + i as f64 * 200.0;
-            d.set_rect(label, 40.0, y, 20.0, 14.0);
-            d.set_rect(h, 40.0, y + 20.0, 600.0, 34.0);
         }
         let hits = check_numbered_section_labels_dom(&d);
         assert_eq!(hits.len(), 2);
@@ -959,7 +976,7 @@ mod tests {
     /// `md:hidden` block at `display: none` on desktop, beside headings a
     /// visitor sees. The same labels shown report.
     #[test]
-    fn numbered_labels_a_visitor_cannot_see_are_not_counted() {
+    fn numbered_labels_the_layout_does_not_render_are_not_counted() {
         let build = |hide_labels: bool| {
             let mut d = FakeDom::new();
             let (_html, body) = d.with_page();
@@ -1002,6 +1019,19 @@ mod tests {
         };
         assert_eq!(check_numbered_section_labels_dom(&build(false)).len(), 3);
         assert!(check_numbered_section_labels_dom(&build(true)).is_empty());
+
+        // v0-applestylescroll-momo.vercel.app (215483): the same labels in a
+        // scroll-driven stage at opacity 0, which a visitor scrolls into
+        // view, still count.
+        let mut d = build(false);
+        let stage_labels: Vec<ElId> = d
+            .query_all(None, "span")
+            .unwrap_or_default();
+        for label in stage_labels {
+            let mobile = d.parent(label).unwrap();
+            d.set_style(mobile, "opacity", "0");
+        }
+        assert_eq!(check_numbered_section_labels_dom(&d).len(), 3);
     }
 
     /// gig-connect-six.vercel.app: a capacity badge, a people icon and a
@@ -1039,10 +1069,6 @@ mod tests {
                 let h = d.add(Some(sec), "h2");
                 d.add_text(h, &format!("Venue number {}", i + 1));
                 d.set_style(h, "fontSize", "28px");
-                // Measured on screen, which the paint gate asks.
-                let y = 100.0 + i as f64 * 200.0;
-                d.set_rect(label, 40.0, y, 20.0, 14.0);
-                d.set_rect(h, 40.0, y + 20.0, 600.0, 34.0);
             }
             d
         };
