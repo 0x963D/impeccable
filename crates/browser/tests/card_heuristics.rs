@@ -326,7 +326,7 @@ fn label_collectors_climb_and_scale() {
     assert_marks(
         &findings,
         "numbered-section-labels",
-        &["Alpha ships first", "Instant deployment", "Omega grows larger"],
-        &["Nu sits too close in size", "Epsilon reads large"],
+        &["Alpha ships first", "Instant deployment", "Omega grows larger", "Xi connects", "Omicron remembers"],
+        &["Nu sits too close in size", "Epsilon reads large", "Lambda sits in a card", "Pi keeps its card"],
     );
 }

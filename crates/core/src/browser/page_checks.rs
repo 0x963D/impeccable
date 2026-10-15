@@ -570,7 +570,7 @@ fn card_edge_sides(
 /// an image or a gradient, or a colour that, composited over that surface,
 /// moves a channel by more than 3. Where the surface cannot be read, any
 /// colour that is not transparent counts, as it did before.
-fn fill_differs_from_surface(dom: &dyn Dom, el: ElId) -> bool {
+pub(crate) fn fill_differs_from_surface(dom: &dyn Dom, el: ElId) -> bool {
     let image = dom.style(el, "backgroundImage");
     if !image.is_empty() && image != "none" {
         return true;

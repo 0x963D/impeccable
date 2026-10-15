@@ -76,6 +76,15 @@
       margin-bottom: 8px;
     }
     .large-h2 { font-size: 44px; }
+
+    /* ── a leading hash, in bare and in drawn articles ── */
+    .hash-index {
+      font-size: 11px;
+      text-transform: uppercase;
+      display: block;
+      margin-bottom: 8px;
+    }
+    .feature-h3-large { font-size: 40px; margin: 0 0 12px; }
   </style>
 </head>
 <body>
@@ -126,6 +135,18 @@
       <p>A 15px index beside a 44px heading still reads as a micro label.</p>
     </section>
 
+    <!-- A leading hash is the number. Each pair sits in an article nothing
+         draws as a card, so the article is a section, not a card. -->
+    <article>
+      <div><span class="hash-index">#1 Connect</span><h3 class="feature-h3-large">Xi connects</h3></div>
+      <p>A hash index over a feature heading in a bare article.</p>
+    </article>
+
+    <article>
+      <div><span class="hash-index">#2 Remember</span><h3 class="feature-h3-large">Omicron remembers</h3></div>
+      <p>The second feature repeats the hash scaffold.</p>
+    </article>
+
   </div>
 
   <!-- ══ SHOULD PASS ══ -->
@@ -170,6 +191,12 @@
       <span class="sec-index">10</span>
       <h3>Lambda sits in a card</h3>
       <p>Per-card indices are item numbering, not section scaffolding.</p>
+    </article>
+
+    <article class="card">
+      <span class="hash-index">#3 Experiment</span>
+      <h3 class="feature-h3-large">Pi keeps its card</h3>
+      <p>The same hash index in an article drawn as a card is the card's own numbering.</p>
     </article>
 
     <nav aria-label="Progress">
