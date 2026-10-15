@@ -1039,8 +1039,8 @@ fn text_clipped_by_an_ancestor(dom: &dyn Dom, el: ElId) -> bool {
     let mut cur = dom.parent(el);
     for _ in 0..MAX_ANCESTORS {
         let Some(c) = cur else { return false };
-        if js::trim(&dom.style(c, "webkitBackgroundClip")) == "text"
-            || js::trim(&dom.style(c, "backgroundClip")) == "text"
+        if crate::checks::rules::background_clips_to_text(&dom.style(c, "webkitBackgroundClip"))
+            || crate::checks::rules::background_clips_to_text(&dom.style(c, "backgroundClip"))
         {
             return true;
         }
@@ -1552,7 +1552,7 @@ fn is_displaced(dom: &dyn Dom, el: ElId) -> bool {
 /// A box that [`is_displaced`] names and that is really moved: `translate:
 /// 0px`, `scale: 1` and `rotate: 0deg` move nothing, though they are not
 /// `none`.
-fn visibly_displaced(dom: &dyn Dom, el: ElId) -> bool {
+pub(crate) fn visibly_displaced(dom: &dyn Dom, el: ElId) -> bool {
     let transform = js::trim(&dom.style(el, "transform")).replace(' ', "");
     if !transform.is_empty() && transform != "none" && !is_identity_matrix(&transform) {
         return true;
@@ -1778,6 +1778,10 @@ fn samples_are_one_colour(samples: &[Rgba]) -> bool {
 /// ramp, 28 levels on the green channel, and coachcall.ai's centred short
 /// headings see a quarter of theirs: geometry cannot tell the judged misfire
 /// from the tell.
+///
+/// A gradient whose stops are one colour paints no ramp: it is a fill
+/// (cochat.ai's `linear-gradient(rgb(14, 15, 18) 0%, rgb(14, 15, 18) 53%)`
+/// headline, solid black type).
 pub(crate) fn gradient_text_paints_a_ramp(dom: &dyn Dom, el: ElId) -> bool {
     let image = dom.style(el, "backgroundImage");
     let stops = parse_gradient_colors(Some(&image));
@@ -1785,7 +1789,10 @@ pub(crate) fn gradient_text_paints_a_ramp(dom: &dyn Dom, el: ElId) -> bool {
         return true;
     }
     let strongest = stops.iter().map(|c| c.alpha_or_one()).fold(0.0, f64::max);
-    strongest * own_opacity(dom, el) >= GRADIENT_TEXT_MIN_STOP_ALPHA
+    if strongest * own_opacity(dom, el) < GRADIENT_TEXT_MIN_STOP_ALPHA {
+        return false;
+    }
+    !crate::checks::rules::gradient_stops_are_one_colour(&image)
 }
 
 /// The smallest type [`box_holds_a_text_line`] reads as a line of text.
@@ -3291,6 +3298,92 @@ pub fn check_element_radial_spotlight_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHi
     check_element_radial_spotlight_dom_with(dom, el, &GlowTextRects::default())
 }
 
+/// How much of `el`'s paint shows through the media laid over it: the
+/// product of `1 - opacity` over every later sibling `<video>` or `<img>`
+/// that covers its box (within a pixel), paints above it and shows a
+/// picture at capture. useforward.co's hero glow sits under a 0.7-opacity
+/// video, so 30% of it shows. A video counts only when it has a `poster`
+/// (an autoplay video with no poster paints nothing until a frame is
+/// decoded, and never where autoplay is blocked) and the capture saw a
+/// decoded frame (`readyState` 2 or more), since a poster that failed or is
+/// pending paints nothing either; an image when the capture
+/// saw it complete with a size of its own, and neither counts under a mask or
+/// a `clip-path`. Anything the capture cannot tell about leaves the glow as
+/// it is (1).
+fn share_left_by_covering_media(dom: &dyn Dom, el: ElId, rect: &Rect) -> f64 {
+    let Some(parent) = dom.parent(el) else { return 1.0 };
+    if !rect.all_finite() || rect.width <= 0.0 || rect.height <= 0.0 {
+        return 1.0;
+    }
+    let positioned = |e: ElId| !matches!(dom.style(e, "position").as_str(), "static" | "");
+    let z_auto = |e: ElId| matches!(dom.style(e, "zIndex").as_str(), "auto" | "");
+    if !z_auto(el) {
+        return 1.0;
+    }
+    let siblings = dom.children(parent);
+    let Some(at) = siblings.iter().position(|&c| c == el) else { return 1.0 };
+    let mut share = 1.0;
+    for &media in &siblings[at + 1..] {
+        let tag = tag_lower(dom, media);
+        let shows_picture = match tag.as_str() {
+            // A video paints nothing until a frame is decoded, or ever when
+            // autoplay is blocked or the source fails, and nothing says
+            // whether its poster loaded: a `readyState` of 2
+            // (`HAVE_CURRENT_DATA`) or more is the proof it paints a
+            // picture, the poster or, where that failed, the frame. The
+            // poster shows until playback starts, so it has to be one that
+            // cannot be transparent: the engine cannot see its alpha, and a
+            // PNG, SVG, WebP or GIF poster may be a texture the glow shows
+            // through.
+            "video" => {
+                dom.video_ready_state(media).is_some_and(|rs| rs >= 2)
+                    && dom.attr(media, "poster").is_some_and(|v| {
+                        !js::trim(&v).is_empty() && !crate::browser::text_layers::url_may_be_transparent(&v)
+                    })
+            }
+            "img" => {
+                let src = dom.image_current_src(media).or_else(|| dom.attr(media, "src")).unwrap_or_default();
+                dom.image_complete(media) == Some(true)
+                    && dom.image_natural_size(media).is_some_and(|(w, h)| w > 0.0 && h > 0.0)
+                    && !crate::browser::text_layers::url_may_be_transparent(&src)
+            }
+            _ => false,
+        };
+        if !shows_picture
+            || !z_auto(media)
+            || !(positioned(media) || !positioned(el))
+            || !crate::browser::painted::later_sibling_paints_after(dom, parent, el, media)
+        {
+            continue;
+        }
+        if !matches!(dom.style(media, "objectFit").as_str(), "cover" | "fill" | "") {
+            continue;
+        }
+        if !crate::browser::painted::painted_at_capture(dom, media) {
+            continue;
+        }
+        // A mask or clip-path can leave the glow showing where the box
+        // covers it (a full-size photo faded out by a `mask-image`).
+        if crate::browser::text_layers::masked_or_clipped(dom, media) {
+            continue;
+        }
+        let m = dom.rect(media);
+        let covers = m.all_finite()
+            && m.left <= rect.left + 1.0
+            && m.top <= rect.top + 1.0
+            && m.right >= rect.right - 1.0
+            && m.bottom >= rect.bottom - 1.0;
+        if !covers {
+            continue;
+        }
+        let opacity = parse_float(&dom.style(media, "opacity"));
+        if opacity.is_finite() {
+            share *= 1.0 - opacity.clamp(0.0, 1.0);
+        }
+    }
+    share
+}
+
 /// The declaration test of `checkRadialSpotlight`, then the prominence gate,
 /// reporting the stop that passed it.
 pub fn check_element_radial_spotlight_dom_with(
@@ -3308,7 +3401,7 @@ pub fn check_element_radial_spotlight_dom_with(
         return Vec::new();
     }
     let prominence = measures::RadialGlowProminence {
-        opacity: effective_opacity_dom(dom, el),
+        opacity: effective_opacity_dom(dom, el) * share_left_by_covering_media(dom, el, &rect),
         backdrop: glow_backdrop(dom, el, &gradient_value),
     };
     let Some(stop) = measures::radial_glow_prominent_stop(&stops, &prominence, || {
@@ -4065,23 +4158,128 @@ fn generated_content_has_text(content: &str) -> bool {
 /// arrow icon parked past a link, a decoration layer) adds nothing, as an
 /// absolutely positioned child with no text adds nothing.
 fn generated_content_unmeasured(dom: &dyn Dom, el: ElId) -> bool {
-    PSEUDOS.iter().any(|which| {
-        if !pseudo_present(dom, el, which) {
+    PSEUDOS.iter().any(|which| pseudo_unmeasured(dom, el, which))
+}
+
+/// [`generated_content_unmeasured`] for one pseudo-element.
+fn pseudo_unmeasured(dom: &dyn Dom, el: ElId, which: &str) -> bool {
+    if !pseudo_present(dom, el, which) {
+        return false;
+    }
+    let content = pseudo_str(dom, el, which, "content");
+    if content == "normal" || pseudo_str(dom, el, which, "display") == "none" {
+        return false;
+    }
+    if generated_content_has_text(&content) {
+        return true;
+    }
+    let position = pseudo_str(dom, el, which, "position");
+    if position == "absolute" || position == "fixed" {
+        return false;
+    }
+    content.contains("url(") || pseudo_px(dom, el, which, "width") > 0.0
+}
+
+/// Whether every unmeasured `::before` and `::after` on `el` generates one
+/// icon glyph and nothing else: a symbol or an icon font's private-use
+/// character (`content: "\e90a"`, `"\2605"`), with a variation selector
+/// after it allowed. An icon is one glyph's width, not a run of words that
+/// could spill. A letter or digit is not an icon (`"WW"` in a large face can
+/// run past a 30px box), nor is a counter, an attribute, an image or a
+/// longer string. The glyph must also fit the box: set no larger than `el`'s
+/// content width, by a recorded `font-size` (a capture that did not record
+/// one leaves its width unsettled), and drawn at that size, with no
+/// `transform` or `scale` of its own. A 200px arrow in a 30px box is a glyph
+/// that spills itself.
+fn generated_content_is_one_glyph(dom: &dyn Dom, el: ElId) -> bool {
+    PSEUDOS.iter().all(|which| {
+        if !pseudo_unmeasured(dom, el, which) {
+            return true;
+        }
+        let font_size = parse_float(&pseudo_str(dom, el, which, "fontSize"));
+        let client = dom.client_width(el);
+        if !(font_size.is_finite() && font_size > 0.0 && client.is_finite() && font_size <= client) {
+            return false;
+        }
+        if ["transform", "scale"]
+            .iter()
+            .any(|prop| !matches!(pseudo_str(dom, el, which, prop).as_str(), "" | "none"))
+        {
             return false;
         }
         let content = pseudo_str(dom, el, which, "content");
-        if content == "normal" || pseudo_str(dom, el, which, "display") == "none" {
+        if content.contains("url(") || content.contains("counter") || content.contains("attr(") {
             return false;
         }
-        if generated_content_has_text(&content) {
-            return true;
-        }
-        let position = pseudo_str(dom, el, which, "position");
-        if position == "absolute" || position == "fixed" {
+        let parts: Vec<&str> = content.split(['"', '\'']).collect();
+        // A quoted string and nothing else: `"x"` splits into three parts.
+        if !(parts.len() == 3 && parts[0].trim().is_empty() && parts[2].trim().is_empty()) {
             return false;
         }
-        content.contains("url(") || pseudo_px(dom, el, which, "width") > 0.0
+        let mut glyphs = parts[1].chars().filter(|c| !('\u{fe00}'..='\u{fe0f}').contains(c));
+        matches!(
+            (glyphs.next(), glyphs.next()),
+            (Some(c), None) if !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control()
+        )
     })
+}
+
+/// Whether `el` clips on the y axis and its own text lies wholly above or
+/// below the box it clips to, as do the rects of everything its descendants
+/// paint: none of it is seen, so nothing it spills on the x axis is seen
+/// either. That is icon-font image replacement written on the y axis
+/// (valero.com's 30px social links, `height: 30px; overflow: hidden`, a
+/// block `::before` glyph, and the label "Youtube" laid out 3px below the
+/// clip), the twin of the `text-indent: -9999px` form. Generated content the
+/// engine cannot measure stops the answer unless it is one glyph per
+/// pseudo-element, which sits inside the box it is the icon of.
+fn text_clipped_away_on_y(
+    dom: &dyn Dom,
+    el: ElId,
+    rect: &Rect,
+    extents: &[Rect],
+    descendants_unmeasured: bool,
+) -> bool {
+    if extents.is_empty() || descendants_unmeasured || !generates_box(dom, el) {
+        return false;
+    }
+    match crate::browser::text_geometry::overflow_y(dom, el).as_str() {
+        "hidden" => {}
+        // `overflow: clip` paints out to its `overflow-clip-margin`; only a
+        // margin of zero (or one the capture did not record) clips at the
+        // padding box.
+        "clip" => {
+            let margin = dom.style(el, "overflowClipMargin");
+            if !(margin.is_empty() || parse_float(&margin) == 0.0) {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    let client = dom.client_height(el);
+    let border_top = style_px(dom, el, "borderTopWidth");
+    let border_bottom = style_px(dom, el, "borderBottomWidth");
+    if !(client.is_finite() && client > 0.0 && border_top.is_finite() && border_bottom.is_finite()) {
+        return false;
+    }
+    // The band mixes the drawn rect with layout metrics, so it holds only
+    // for a box drawn at its layout size: under a transform that scales it,
+    // the drawn clip is not `clientHeight` tall, and the box keeps the base
+    // reading.
+    if (rect.height - (client + border_top + border_bottom)).abs() > 1.0 {
+        return false;
+    }
+    let top = rect.top + border_top;
+    if !top.is_finite() {
+        return false;
+    }
+    let bottom = top + client;
+    if generated_content_unmeasured(dom, el) && !generated_content_is_one_glyph(dom, el) {
+        return false;
+    }
+    extents
+        .iter()
+        .all(|r| r.all_finite() && (r.bottom <= top || r.top >= bottom))
 }
 
 /// The rects of what `el`'s descendants paint, for deciding whether its
@@ -4175,9 +4373,12 @@ fn painted_overflow_extent(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<(f64,
     if own.width > 0.0 && own.height > 0.0 {
         extents.push(own);
     }
-    let mut unmeasured = generated_content_unmeasured(dom, el);
-    painted_descendant_extents(dom, el, &mut extents, &mut unmeasured);
-    if unmeasured {
+    let mut descendants_unmeasured = false;
+    painted_descendant_extents(dom, el, &mut extents, &mut descendants_unmeasured);
+    if text_clipped_away_on_y(dom, el, rect, &extents, descendants_unmeasured) {
+        return None;
+    }
+    if descendants_unmeasured || generated_content_unmeasured(dom, el) {
         return Some(scroll_extent());
     }
     // A box that clips paints none of what lies wholly outside it.
@@ -7195,6 +7396,143 @@ mod tests {
         assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
     }
 
+    /// useforward.co (322717): the hero's warm glow sits under an autoplay
+    /// video at `opacity: 0.7`, which leaves 30% of it showing.
+    #[test]
+    fn radial_spotlight_scales_by_the_media_laid_over_it() {
+        let run = |attrs: &[(&str, &str)], opacity: &str, width: f64| {
+            let (mut d, section, glow) =
+                dark_page_with_glow("radial-gradient(circle, rgba(171, 151, 116, 0.35) 0%, transparent 28%)");
+            let video = d.add(Some(section), "video");
+            d.el_mut(video).video_ready_state = Some(4);
+            for (k, v) in attrs {
+                d.set_attr(video, k, v);
+            }
+            d.set_styles(video, &[("position", "absolute"), ("opacity", opacity), ("objectFit", "cover")]);
+            d.set_rect(video, 0.0, 0.0, width, 502.0);
+            check_element_radial_spotlight_dom(&d, glow)
+        };
+        let poster = [("poster", "/images/poster.jpg")];
+        assert!(run(&poster, "0.7", 803.0).is_empty());
+        // An autoplay video with no poster may paint nothing at all.
+        let autoplay = [("autoplay", ""), ("src", "/videos/hero.mp4")];
+        assert_eq!(run(&autoplay, "0.7", 803.0).len(), 1);
+        // A fainter video leaves the glow bright enough.
+        assert_eq!(run(&poster, "0.3", 803.0).len(), 1);
+        // A video that may show nothing, one that covers part of the glow,
+        // and an opacity the capture did not record leave it as it was.
+        assert_eq!(run(&[], "0.7", 803.0).len(), 1);
+        assert_eq!(run(&[("src", "/videos/hero.mp4")], "0.7", 803.0).len(), 1);
+        assert_eq!(run(&poster, "0.7", 400.0).len(), 1);
+        assert_eq!(run(&poster, "", 803.0).len(), 1);
+    }
+
+    /// A flex or grid container paints its items in `order`: a video later
+    /// in the source with a lower `order` paints under the glow.
+    #[test]
+    fn radial_spotlight_media_cover_follows_css_order() {
+        let run = |section_display: &str, glow_order: &str, video_order: &str| {
+            let (mut d, section, glow) =
+                dark_page_with_glow("radial-gradient(circle, rgba(171, 151, 116, 0.35) 0%, transparent 28%)");
+            d.set_style(section, "display", section_display);
+            d.set_styles(glow, &[("position", "relative"), ("order", glow_order)]);
+            let video = d.add(Some(section), "video");
+            d.el_mut(video).video_ready_state = Some(4);
+            d.set_attr(video, "poster", "/images/poster.jpg");
+            d.set_styles(video, &[("position", "relative"), ("opacity", "0.7"), ("objectFit", "cover"), ("order", video_order)]);
+            d.set_rect(video, 0.0, 0.0, 803.0, 502.0);
+            check_element_radial_spotlight_dom(&d, glow).len()
+        };
+        assert_eq!(run("flex", "0", "0"), 0);
+        assert_eq!(run("grid", "1", "2"), 0);
+        // Ordered first, the video paints under the glow.
+        assert_eq!(run("flex", "2", "1"), 1);
+        // An `order` the capture did not record is unknown.
+        assert_eq!(run("flex", "0", ""), 1);
+        // A block container paints in tree order.
+        assert_eq!(run("block", "2", "1"), 0);
+    }
+
+    /// A loaded image over the glow covers it unless it may be a
+    /// transparent texture: a PNG or SVG.
+    #[test]
+    fn radial_spotlight_sees_through_a_png_or_svg_texture() {
+        let run = |src: &str| {
+            let (mut d, section, glow) =
+                dark_page_with_glow("radial-gradient(circle, rgba(171, 151, 116, 0.35) 0%, transparent 28%)");
+            let img = d.add(Some(section), "img");
+            d.set_attr(img, "src", src);
+            d.el_mut(img).image_complete = Some(true);
+            d.el_mut(img).image_natural_size = Some((1600.0, 1000.0));
+            d.set_styles(img, &[("position", "absolute"), ("opacity", "1"), ("objectFit", "cover")]);
+            d.set_rect(img, 0.0, 0.0, 803.0, 502.0);
+            check_element_radial_spotlight_dom(&d, glow).len()
+        };
+        assert_eq!(run("/images/hero.jpg"), 0);
+        assert_eq!(run("/images/grain.png?v=3"), 1);
+        assert_eq!(run("/images/noise.svg"), 1);
+    }
+
+    /// Review: a video poster gets the same PNG / SVG exclusion as an image,
+    /// since a transparent poster leaves the glow showing.
+    #[test]
+    fn radial_spotlight_sees_through_a_png_or_svg_poster() {
+        let run_state = |poster: &str, ready_state: Option<u8>| {
+            let (mut d, section, glow) =
+                dark_page_with_glow("radial-gradient(circle, rgba(171, 151, 116, 0.35) 0%, transparent 28%)");
+            let video = d.add(Some(section), "video");
+            d.el_mut(video).video_ready_state = ready_state;
+            d.set_attr(video, "poster", poster);
+            d.set_styles(video, &[("position", "absolute"), ("opacity", "1"), ("objectFit", "cover")]);
+            d.set_rect(video, 0.0, 0.0, 803.0, 502.0);
+            check_element_radial_spotlight_dom(&d, glow).len()
+        };
+        let run = |poster: &str| run_state(poster, Some(4));
+        assert_eq!(run("/images/poster.jpg"), 0);
+        assert_eq!(run("/images/poster.PNG?v=2"), 1);
+        assert_eq!(run("/images/poster.svg#frame"), 1);
+        // Review: WebP, GIF and AVIF carry alpha too, as do the same
+        // formats in a data URI, and a URL naming no format is unknown.
+        assert_eq!(run("/images/poster.webp"), 1);
+        assert_eq!(run("/images/poster.GIF"), 1);
+        assert_eq!(run("/images/poster.avif?w=1600"), 1);
+        assert_eq!(run("data:image/png;base64,iVBORw0KGgo="), 1);
+        assert_eq!(run("data:image/svg+xml,%3Csvg%3E%3C/svg%3E"), 1);
+        assert_eq!(run("data:image/webp;base64,UklGRg=="), 1);
+        assert_eq!(run("https://cdn.example.com/media/hero?w=1600"), 1);
+        assert_eq!(run("data:image/jpeg;base64,/9j/4AAQ"), 0);
+        assert_eq!(run("/images/poster.JPEG#t=1"), 0);
+        // Review: a poster that failed or is still loading paints nothing,
+        // and nothing says which; only a decoded frame (`readyState` 2 or
+        // more) proves the video shows a picture.
+        assert_eq!(run_state("/images/poster.jpg", Some(1)), 1);
+        assert_eq!(run_state("/images/poster.jpg", Some(0)), 1);
+        assert_eq!(run_state("/images/poster.jpg", None), 1);
+        assert_eq!(run_state("/images/poster.jpg", Some(2)), 0);
+    }
+
+    /// Review: a full-size photo faded out by a `mask-image`, or cut by a
+    /// `clip-path`, covers the glow with its box but not with its paint.
+    #[test]
+    fn radial_spotlight_sees_past_a_masked_or_clipped_photo() {
+        let run = |styles: &[(&str, &str)]| {
+            let (mut d, section, glow) =
+                dark_page_with_glow("radial-gradient(circle, rgba(171, 151, 116, 0.35) 0%, transparent 28%)");
+            let img = d.add(Some(section), "img");
+            d.set_attr(img, "src", "/images/hero.jpg");
+            d.el_mut(img).image_complete = Some(true);
+            d.el_mut(img).image_natural_size = Some((1600.0, 1000.0));
+            d.set_styles(img, &[("position", "absolute"), ("opacity", "1"), ("objectFit", "cover")]);
+            d.set_styles(img, styles);
+            d.set_rect(img, 0.0, 0.0, 803.0, 502.0);
+            check_element_radial_spotlight_dom(&d, glow).len()
+        };
+        assert_eq!(run(&[("maskImage", "none"), ("clipPath", "none")]), 0);
+        assert_eq!(run(&[("maskImage", "linear-gradient(black, transparent)")]), 1);
+        assert_eq!(run(&[("webkitMaskImage", "linear-gradient(black, transparent)")]), 1);
+        assert_eq!(run(&[("clipPath", "inset(0px 50% 0px 0px)")]), 1);
+    }
+
     #[test]
     fn radial_spotlight_measures_a_hero_painted_with_a_gradient() {
         // The commonest way to build this pattern: a glow layer over a hero
@@ -7874,6 +8212,90 @@ mod tests {
         // With visible overflow the label really lands 9,999px away.
         d.set_styles(tab, &[("overflow", "visible"), ("overflowX", "visible"), ("overflowY", "visible")]);
         assert_eq!(check_element_text_overflow_dom(&d, tab).len(), 1);
+    }
+
+    /// observations-47 row 2: valero.com's icon-font social links clip on
+    /// the y axis. The 30px link holds a block `::before` glyph and lays the
+    /// label "Youtube" out 3px below its clip, so the 54px the label runs
+    /// past the box on x is never painted.
+    #[test]
+    fn text_overflow_skips_a_label_clipped_away_on_y() {
+        let (mut d, body) = page();
+        let link = d.add(Some(body), "a");
+        visible(&mut d, link);
+        d.set_attr(link, "class", "icon-youtube");
+        d.add_text(link, "Youtube");
+        d.set_rect(link, 48.0, 600.0, 30.0, 30.0);
+        d.el_mut(link).client_width = 30.0;
+        d.el_mut(link).client_height = 30.0;
+        d.el_mut(link).scroll_width = 84.0;
+        d.set_styles(link, &[("display", "block"), ("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("position", "static"), ("fontSize", "24px"), ("borderTopWidth", "0px"), ("borderBottomWidth", "0px")]);
+        d.set_text_rect(link, 48.0, 633.0, 84.0, 25.0);
+        d.set_pseudo_style(link, "::before", "content", "\"\u{e90a}\"");
+        d.set_pseudo_style(link, "::before", "display", "block");
+        d.set_pseudo_style(link, "::before", "fontSize", "24px");
+        assert!(check_element_text_overflow_dom(&d, link).is_empty(), "the label sits below the clip");
+
+        // A glyph whose size the capture did not record, or set wider than
+        // the box, or drawn larger by a transform, may spill itself (review).
+        d.set_pseudo_style(link, "::before", "fontSize", "");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "unrecorded glyph size");
+        d.set_pseudo_style(link, "::before", "fontSize", "200px");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "a glyph wider than the box");
+        d.set_pseudo_style(link, "::before", "fontSize", "24px");
+        d.set_pseudo_style(link, "::before", "transform", "matrix(4, 0, 0, 4, 0, 0)");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "a scaled glyph");
+        d.set_pseudo_style(link, "::before", "transform", "none");
+        d.set_pseudo_style(link, "::before", "scale", "4");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "a scaled glyph");
+        d.set_pseudo_style(link, "::before", "scale", "none");
+        assert!(check_element_text_overflow_dom(&d, link).is_empty(), "back to the icon");
+
+        // Without a y clip the label shows below the box, and its spill with it.
+        d.set_style(link, "overflowY", "visible");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "no y clip");
+        d.set_style(link, "overflowY", "hidden");
+        // The shorthand alone says the same.
+        d.set_styles(link, &[("overflowY", ""), ("overflow", "hidden")]);
+        assert!(check_element_text_overflow_dom(&d, link).is_empty(), "the shorthand clips y");
+        d.set_style(link, "overflowY", "hidden");
+        // `overflow: clip` with a clip margin paints past the box.
+        d.set_styles(link, &[("overflowY", "clip"), ("overflowClipMargin", "8px")]);
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "a clip margin");
+        d.set_style(link, "overflowClipMargin", "0px");
+        assert!(check_element_text_overflow_dom(&d, link).is_empty(), "clip with no margin");
+        d.set_style(link, "overflowY", "hidden");
+        // Drawn at twice its layout size (a scale transform), the clip is
+        // 60px tall and a label at 640 to 660 shows inside it.
+        d.set_rect(link, 48.0, 600.0, 60.0, 60.0);
+        d.set_text_rect(link, 48.0, 640.0, 168.0, 20.0);
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "a scaled box");
+        d.set_rect(link, 48.0, 600.0, 30.0, 30.0);
+        d.set_text_rect(link, 48.0, 633.0, 84.0, 25.0);
+        // A label that reaches into the box is seen.
+        d.set_text_rect(link, 48.0, 620.0, 84.0, 25.0);
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "the label crosses the clip");
+        d.set_text_rect(link, 48.0, 633.0, 84.0, 25.0);
+        // Generated words, not a glyph, may themselves spill: taken as read.
+        d.set_pseudo_style(link, "::before", "content", "\"Watch us on Youtube\"");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "generated words");
+        d.set_pseudo_style(link, "::before", "content", "counter(item)");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "a counter");
+        d.set_pseudo_style(link, "::before", "content", "\"WW\"");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "letters are not an icon");
+        d.set_pseudo_style(link, "::before", "content", "\"\u{2605}\u{2605}\"");
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "two glyphs");
+        d.set_pseudo_style(link, "::before", "content", "\"\u{2605}\u{fe0f}\"");
+        assert!(check_element_text_overflow_dom(&d, link).is_empty(), "a symbol and its variation selector");
+        d.set_pseudo_style(link, "::before", "content", "\"\u{e90a}\"");
+        // A child whose text sits inside the box is seen.
+        let note = d.add(Some(link), "span");
+        visible(&mut d, note);
+        d.set_style(note, "position", "static");
+        d.add_text(note, "New");
+        d.set_rect(note, 48.0, 605.0, 70.0, 20.0);
+        d.set_text_rect(note, 48.0, 605.0, 70.0, 20.0);
+        assert_eq!(check_element_text_overflow_dom(&d, link).len(), 1, "a child's text inside the clip");
     }
 
     /// walkthroughs-20 miss 4a: `overflow-x: hidden` computes the shorthand to
@@ -8893,6 +9315,149 @@ mod tests {
         d.set_style(img, "zIndex", "10");
         assert!(!reports_contrast(&colors(&d, text)), "{:?}", colors(&d, text));
         assert!(!reports_contrast(&colors(&d, initial)), "{:?}", colors(&d, initial));
+    }
+
+    /// thingstohave.app (323632): avatar initials below the fold, under the
+    /// loaded photo the next sibling lays over them. No point is asked down
+    /// there, so the tree says it.
+    #[test]
+    fn a_loaded_photo_over_initials_below_the_fold_leaves_them_unscored() {
+        let run_src = |complete: Option<bool>, top: f64, img_width: f64, src: &str| {
+            let (mut d, body) = page();
+            let avatar = bare_box(&mut d, body, "div", (665.0, top, 35.0, 35.0));
+            d.set_style(avatar, "position", "relative");
+            let initial = faint_copy(&mut d, avatar, "rgb(220, 220, 220)", (670.0, top + 8.0, 20.0, 18.0));
+            d.set_styles(initial, &[("position", "absolute"), ("zIndex", "auto")]);
+            let wrap = bare_box(&mut d, avatar, "div", (665.0, top, 35.0, 35.0));
+            d.set_styles(wrap, &[("position", "absolute"), ("zIndex", "auto"), ("opacity", "1")]);
+            let img = bare_box(&mut d, wrap, "img", (665.0, top, img_width, 35.0));
+            d.set_styles(img, &[("opacity", "1"), ("objectFit", "cover")]);
+            d.el_mut(img).image_complete = complete;
+            d.el_mut(img).image_natural_size = Some((96.0, 96.0));
+            d.set_attr(img, "src", src);
+            colors(&d, initial)
+        };
+        let run = |complete: Option<bool>, top: f64, img_width: f64| {
+            run_src(complete, top, img_width, "/avatars/sophia.jpg")
+        };
+        assert!(!reports_contrast(&run(Some(true), 1334.0, 35.0)));
+        // A PNG or SVG may be transparent.
+        assert!(reports_contrast(&run_src(Some(true), 1334.0, 35.0, "/avatars/sophia.png?v=2")));
+        assert!(reports_contrast(&run_src(Some(true), 1334.0, 35.0, "/avatars/sophia.svg")));
+        // Review: so may a WebP, a PNG data URI, or a URL naming no format.
+        assert!(reports_contrast(&run_src(Some(true), 1334.0, 35.0, "/avatars/sophia.webp")));
+        assert!(reports_contrast(&run_src(Some(true), 1334.0, 35.0, "data:image/png;base64,iVBORw0KGgo=")));
+        assert!(reports_contrast(&run_src(Some(true), 1334.0, 35.0, "https://cdn.example.com/u/42?s=96")));
+        // A photo still loading, or not recorded, or covering only part of
+        // the initials, leaves the verdict.
+        assert!(reports_contrast(&run(Some(false), 1334.0, 35.0)));
+        assert!(reports_contrast(&run(None, 1334.0, 35.0)));
+        assert!(reports_contrast(&run(Some(true), 1334.0, 12.0)));
+    }
+
+    /// Review: a photo masked or clipped over the initials may leave them
+    /// showing, so its box covering them is no proof its paint does.
+    #[test]
+    fn a_masked_or_clipped_photo_over_initials_leaves_their_verdict() {
+        let run = |on_wrap: bool, styles: &[(&str, &str)]| {
+            let (mut d, body) = page();
+            let top = 1334.0;
+            let avatar = bare_box(&mut d, body, "div", (665.0, top, 35.0, 35.0));
+            d.set_style(avatar, "position", "relative");
+            let initial = faint_copy(&mut d, avatar, "rgb(220, 220, 220)", (670.0, top + 8.0, 20.0, 18.0));
+            d.set_styles(initial, &[("position", "absolute"), ("zIndex", "auto")]);
+            let wrap = bare_box(&mut d, avatar, "div", (665.0, top, 35.0, 35.0));
+            d.set_styles(wrap, &[("position", "absolute"), ("zIndex", "auto"), ("opacity", "1")]);
+            let img = bare_box(&mut d, wrap, "img", (665.0, top, 35.0, 35.0));
+            d.set_styles(img, &[("opacity", "1"), ("objectFit", "cover")]);
+            d.set_styles(if on_wrap { wrap } else { img }, styles);
+            d.el_mut(img).image_complete = Some(true);
+            d.el_mut(img).image_natural_size = Some((96.0, 96.0));
+            d.set_attr(img, "src", "/avatars/sophia.jpg");
+            reports_contrast(&colors(&d, initial))
+        };
+        assert!(!run(false, &[("maskImage", "none"), ("clipPath", "none")]));
+        assert!(run(false, &[("maskImage", "linear-gradient(black, transparent)")]));
+        assert!(run(true, &[("webkitMaskImage", "radial-gradient(black, transparent)")]));
+        assert!(run(false, &[("clipPath", "inset(0px 0px 0px 60%)")]));
+    }
+
+    /// Review: a wrapper with `overflow: hidden` narrower than the photo
+    /// shows only part of it, and initials outside that part stay visible.
+    #[test]
+    fn a_photo_cut_by_a_narrow_overflow_wrapper_leaves_the_initials_verdict() {
+        let run = |wrap_width: f64, overflow: &str| {
+            let (mut d, body) = page();
+            let top = 1334.0;
+            let avatar = bare_box(&mut d, body, "div", (665.0, top, 35.0, 35.0));
+            d.set_style(avatar, "position", "relative");
+            let initial = faint_copy(&mut d, avatar, "rgb(220, 220, 220)", (670.0, top + 8.0, 20.0, 18.0));
+            d.set_styles(initial, &[("position", "absolute"), ("zIndex", "auto")]);
+            let wrap = bare_box(&mut d, avatar, "div", (665.0, top, wrap_width, 35.0));
+            d.set_styles(
+                wrap,
+                &[("position", "absolute"), ("zIndex", "auto"), ("opacity", "1"), ("overflow", overflow), ("overflowX", overflow), ("overflowY", overflow)],
+            );
+            let img = bare_box(&mut d, wrap, "img", (665.0, top, 35.0, 35.0));
+            d.set_styles(img, &[("opacity", "1"), ("objectFit", "cover")]);
+            d.el_mut(img).image_complete = Some(true);
+            d.el_mut(img).image_natural_size = Some((96.0, 96.0));
+            d.set_attr(img, "src", "/avatars/sophia.jpg");
+            reports_contrast(&colors(&d, initial))
+        };
+        assert!(!run(35.0, "hidden"));
+        assert!(!run(12.0, "visible"));
+        assert!(run(12.0, "hidden"));
+        assert!(run(12.0, "clip"));
+    }
+
+    /// In a flex avatar whose photo wrapper is an in-flow item, CSS `order`
+    /// decides whether the photo paints over the initials.
+    #[test]
+    fn a_photo_ordered_before_the_initials_does_not_cover_them() {
+        let run_z = |initial_order: &str, wrap_order: &str, img_z: &str| {
+            let (mut d, body) = page();
+            let top = 1334.0;
+            let avatar = bare_box(&mut d, body, "div", (665.0, top, 35.0, 35.0));
+            d.set_styles(avatar, &[("position", "relative"), ("display", "flex")]);
+            let initial = faint_copy(&mut d, avatar, "rgb(220, 220, 220)", (670.0, top + 8.0, 20.0, 18.0));
+            d.set_styles(initial, &[("position", "relative"), ("zIndex", "auto"), ("order", initial_order)]);
+            let wrap = bare_box(&mut d, avatar, "div", (665.0, top, 35.0, 35.0));
+            d.set_styles(wrap, &[("position", "relative"), ("zIndex", "auto"), ("opacity", "1"), ("order", wrap_order)]);
+            let img = bare_box(&mut d, wrap, "img", (665.0, top, 35.0, 35.0));
+            d.set_styles(img, &[("opacity", "1"), ("objectFit", "cover"), ("zIndex", img_z)]);
+            d.el_mut(img).image_complete = Some(true);
+            d.el_mut(img).image_natural_size = Some((96.0, 96.0));
+            d.set_attr(img, "src", "/avatars/sophia.jpg");
+            reports_contrast(&colors(&d, initial))
+        };
+        let run = |initial_order: &str, wrap_order: &str| run_z(initial_order, wrap_order, "auto");
+        assert!(!run("0", "0"));
+        // A photo at `z-index: -1` paints behind the initials.
+        assert!(run_z("0", "0", "-1"));
+        assert!(run("1", "0"));
+        assert!(run("0", ""));
+    }
+
+    /// A transparent grain overlay laid over a section below the fold: the
+    /// engine cannot see its alpha, and it is no avatar, so the muted copy
+    /// under it keeps its verdict.
+    #[test]
+    fn a_grain_overlay_below_the_fold_does_not_cover_the_text() {
+        let run = |src: &str| {
+            let (mut d, body) = page();
+            let section = bare_box(&mut d, body, "section", (0.0, 1400.0, 1280.0, 400.0));
+            d.set_style(section, "position", "relative");
+            let p = faint_copy(&mut d, section, "rgb(220, 220, 220)", (40.0, 1500.0, 600.0, 28.0));
+            let grain = bare_box(&mut d, section, "img", (0.0, 1400.0, 1280.0, 400.0));
+            d.set_styles(grain, &[("position", "absolute"), ("zIndex", "auto"), ("opacity", "1"), ("objectFit", "cover")]);
+            d.set_attr(grain, "src", src);
+            d.el_mut(grain).image_complete = Some(true);
+            d.el_mut(grain).image_natural_size = Some((512.0, 512.0));
+            colors(&d, p)
+        };
+        assert!(reports_contrast(&run("/textures/grain.png")));
+        assert!(reports_contrast(&run("/textures/grain.webp")));
     }
 
     #[test]
