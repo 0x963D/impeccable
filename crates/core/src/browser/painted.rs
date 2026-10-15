@@ -1062,28 +1062,37 @@ fn is_script_scroll_frame(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_h: f64) ->
         && cr.height >= fold - 1.0
         && has_overflow(dom.scroll_height(p), dom.client_height(p))
         && !capped_by_max_height(dom, p, cr, js::math_max(fold, viewport_h))
-        && in_flow_content_runs_past(dom, p, cr.bottom)
+        && content_runs_past(dom, p, cr)
 }
 
-/// How many descendants [`in_flow_content_runs_past`] reads before it stops
-/// and answers yes.
+/// How many descendants [`content_runs_past`] reads before it stops and
+/// answers yes.
 const IN_FLOW_WALK_BUDGET: usize = 2000;
 
-/// Whether content in `p`'s flow runs past its bottom edge: a descendant,
-/// reached without passing through an absolutely or fixed positioned box,
-/// whose box ends more than a pixel below `bottom`. A scroll library moves
-/// one in-flow wrapper that holds the page. A map holds its markers as
-/// absolutely placed children: chefsspecial.app's Mapbox box (896x800,
-/// `overflow: hidden`) records a scroll height of 1,626 from markers placed
-/// below its edge, and those are clipped, not scrolled to. A box the capture
-/// did not measure, text of `p`'s own, or a walk past
+/// The share of the frame's height an absolutely placed box has to take to
+/// count as content a script moves through the frame.
+const PLACED_CONTENT_MIN_SHARE: f64 = 0.5;
+
+/// Whether content a script could scroll through `p` runs past its bottom
+/// edge (`frame`): a descendant in `p`'s flow whose box ends more than a
+/// pixel below it, or an absolutely placed box that starts inside it, runs
+/// past it, and is at least half as tall as it. A scroll library moves one
+/// wrapper that holds the page, in flow or placed; incredible.one's pinned
+/// stage (a sticky section at `overflow: hidden`) holds a placed screen,
+/// 707px of its 800, that it lifts into view as the page scrolls. A map
+/// holds its markers as small absolutely placed boxes: chefsspecial.app's
+/// Mapbox box (896x800, `overflow: hidden`) records a scroll height of 1,626
+/// from markers placed below its edge, and those are clipped, not scrolled
+/// to. A placed box's own subtree is not read, and a fixed one adds nothing.
+/// A box the capture did not measure, text of `p`'s own, or a walk past
 /// [`IN_FLOW_WALK_BUDGET`] answers yes, which keeps the frame.
-fn in_flow_content_runs_past(dom: &dyn Dom, p: ElId, bottom: f64) -> bool {
+fn content_runs_past(dom: &dyn Dom, p: ElId, frame: &Rect) -> bool {
     // Text of its own may be what runs past; the capture measures no text
     // node, so that keeps the frame too.
     if has_direct_text_longer_than(dom, p, 0) {
         return true;
     }
+    let bottom = frame.bottom;
     let mut stack = dom.children(p);
     let mut read = 0usize;
     while let Some(c) = stack.pop() {
@@ -1091,11 +1100,21 @@ fn in_flow_content_runs_past(dom: &dyn Dom, p: ElId, bottom: f64) -> bool {
         if read > IN_FLOW_WALK_BUDGET {
             return true;
         }
-        if matches!(dom.style(c, "position").as_str(), "absolute" | "fixed") {
-            continue;
-        }
         let r = dom.rect(c);
-        if !r.all_finite() || r.bottom > bottom + 1.0 {
+        if !r.all_finite() {
+            return true;
+        }
+        match dom.style(c, "position").as_str() {
+            "fixed" => continue,
+            "absolute" => {
+                if r.top < bottom - 1.0 && r.bottom > bottom + 1.0 && r.height >= frame.height * PLACED_CONTENT_MIN_SHARE {
+                    return true;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if r.bottom > bottom + 1.0 {
             return true;
         }
         stack.extend(dom.children(c));
@@ -3241,9 +3260,19 @@ mod tests {
         // So does one the capture did not measure.
         d.set_rect(content, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
         assert_eq!(why(&d, count), None);
-        // And text the box holds of its own.
+        // incredible.one (10048156): a pinned stage lifts a placed screen,
+        // most of the frame's height, that starts inside it and runs past.
         d.set_rect(content, 0.0, 0.0, 896.0, 400.0);
         assert_eq!(why(&d, count), Some(Unpainted::ClippedOut));
+        let screen = d.add(Some(map), "div");
+        d.set_style(screen, "position", "absolute");
+        d.set_rect(screen, 0.0, 700.0, 896.0, 707.0);
+        assert_eq!(why(&d, count), None);
+        // A small placed box across the edge (a marker half under it) is
+        // not that.
+        d.set_rect(screen, 0.0, 780.0, 56.0, 56.0);
+        assert_eq!(why(&d, count), Some(Unpainted::ClippedOut));
+        // And text the box holds of its own.
         d.add_text(map, "Loading the map of every restaurant near you");
         assert_eq!(why(&d, count), None);
     }
