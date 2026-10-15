@@ -915,7 +915,7 @@ fn no_area(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
 }
 
 /// `overflow-x` / `overflow-y`, from the shorthand when neither was recorded.
-fn overflow_axes(dom: &dyn Dom, el: ElId) -> (String, String) {
+pub(crate) fn overflow_axes(dom: &dyn Dom, el: ElId) -> (String, String) {
     let ox = dom.style(el, "overflowX");
     let oy = dom.style(el, "overflowY");
     if ox.is_empty() && oy.is_empty() {
@@ -927,7 +927,7 @@ fn overflow_axes(dom: &dyn Dom, el: ElId) -> (String, String) {
 }
 
 /// `overflow` does not apply to boxes that generate no block of their own.
-fn clips_contents(display: &str) -> bool {
+pub(crate) fn clips_contents(display: &str) -> bool {
     !matches!(display, "contents" | "inline" | "table-row" | "table-row-group")
 }
 
@@ -955,7 +955,7 @@ fn misses_axis(start: f64, end: f64, extent: f64, lo: f64, hi: f64) -> bool {
     }
 }
 
-fn clips(value: &str) -> bool {
+pub(crate) fn clips(value: &str) -> bool {
     matches!(value, "hidden" | "clip" | "auto" | "scroll")
 }
 

@@ -3532,6 +3532,12 @@ const OVERPRINT_GLYPH_PROPS: &[&str] = &[
     "textTransform",
 ];
 
+/// What moves or breaks a wrapped run's later lines while its first stays
+/// put: two runs that wrap are an overprint only where these are recorded
+/// and equal too. `text-indent` moves the first line alone, which the
+/// origin test already compares.
+const OVERPRINT_WRAP_PROPS: &[&str] = &["lineHeight", "textAlign", "whiteSpace", "wordBreak", "hyphens"];
+
 /// How many of its lines a text rect may run to and still hold one: a
 /// second line takes it to two.
 const OVERPRINT_WRAP_LINES: f64 = 1.5;
@@ -3554,8 +3560,9 @@ fn one_line_px(dom: &dyn Dom, el: ElId) -> Option<f64> {
 /// glyphs from the same origin (within a pixel), and, where the top run
 /// wraps, breaking its lines at the same width, so its glyphs land on the
 /// victim's own. Both have to carry text of their own and a measured text
-/// rect, and every property in [`OVERPRINT_GLYPH_PROPS`] has to be recorded
-/// on both and equal: `text-transform: uppercase` over the same DOM text
+/// rect, and every property in [`OVERPRINT_GLYPH_PROPS`] (and, for a top run
+/// that wraps, in [`OVERPRINT_WRAP_PROPS`]: a taller `line-height` drops its
+/// later lines below the victim's) has to be recorded on both and equal: `text-transform: uppercase` over the same DOM text
 /// draws other glyphs, and a value the capture did not record is unknown,
 /// which keeps the collision.
 fn overprints(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
@@ -3566,9 +3573,10 @@ fn overprints(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
     // lines land on the victim's only where the victim breaks at the same
     // width: then the two text rects are as wide as each other, and the top
     // one no taller.
+    let mut wraps = true;
     let same_origin = match (dom.direct_text_rect(top), dom.direct_text_rect(victim)) {
         (Some(a), Some(b)) if a.all_finite() && b.all_finite() => {
-            let wraps = match one_line_px(dom, top) {
+            wraps = match one_line_px(dom, top) {
                 Some(line) => a.height > line * OVERPRINT_WRAP_LINES,
                 None => true,
             };
@@ -3581,11 +3589,13 @@ fn overprints(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
         }
         _ => false,
     };
+    let equal = |p: &&str| {
+        let v = dom.style(top, p);
+        !v.is_empty() && v == dom.style(victim, p)
+    };
     if !same_origin
-        || !OVERPRINT_GLYPH_PROPS.iter().all(|p| {
-            let v = dom.style(top, p);
-            !v.is_empty() && v == dom.style(victim, p)
-        })
+        || !OVERPRINT_GLYPH_PROPS.iter().all(equal)
+        || (wraps && !OVERPRINT_WRAP_PROPS.iter().all(equal))
     {
         return false;
     }
@@ -6262,28 +6272,36 @@ mod tests {
             ("textTransform", "none"),
             ("fontSize", "24px"),
             ("fontFamily", "Arial"),
+            ("textAlign", "start"),
+            ("whiteSpace", "normal"),
+            ("wordBreak", "normal"),
+            ("hyphens", "manual"),
         ];
         // `tagline` and `logo` are the two runs' text rects (width, height).
-        let run = |tagline_text: (f64, f64), logo_text: (f64, f64), line_height: &str| {
+        let run_lines = |tagline_text: (f64, f64), logo_text: (f64, f64), tagline_lh: &str, logo_lh: &str, extra: &[(&str, &str)]| {
             let mut d = FakeDom::new();
             let (_h, body) = d.with_page();
             let words = "Schlittermann internet consulting and hosting";
             let tagline = d.add(Some(body), "span");
             d.set_styles(tagline, PROBE_BASE);
             d.set_styles(tagline, GLYPHS);
-            d.set_styles(tagline, &[("position", "absolute"), ("lineHeight", line_height)]);
+            d.set_styles(tagline, &[("position", "absolute"), ("lineHeight", tagline_lh)]);
             d.set_rect(tagline, 190.0, 80.0, tagline_text.0 + 10.0, tagline_text.1 + 6.0);
             d.set_text_rect(tagline, 190.0, 81.0, tagline_text.0, tagline_text.1);
             d.add_text(tagline, words);
             let logo = d.add(Some(body), "a");
             d.set_styles(logo, PROBE_BASE);
             d.set_styles(logo, GLYPHS);
-            d.set_styles(logo, &[("position", "absolute"), ("lineHeight", line_height)]);
+            d.set_styles(logo, &[("position", "absolute"), ("lineHeight", logo_lh)]);
+            d.set_styles(logo, extra);
             d.set_rect(logo, 190.0, 80.0, logo_text.0 + 10.0, logo_text.1 + 6.0);
             d.set_text_rect(logo, 190.0, 81.0, logo_text.0, logo_text.1);
             d.add_text(logo, words);
             mark_body_descendants(&mut d);
             check_text_occlusion_dom(&d).len()
+        };
+        let run = |tagline_text: (f64, f64), logo_text: (f64, f64), line_height: &str| {
+            run_lines(tagline_text, logo_text, line_height, line_height, &[])
         };
         // Wrapped at the same width, the logo redraws the tagline's glyphs.
         assert_eq!(run((290.0, 84.0), (290.0, 84.0), "normal"), 0);
@@ -6300,6 +6318,16 @@ mod tests {
         assert_eq!(run((290.0, 96.0), (280.0, 48.0), "48px"), 0);
         // The same 48px rect at a normal line-height is two lines.
         assert_eq!(run((290.0, 96.0), (280.0, 48.0), "normal"), 1);
+        // Review: wrapped at the same width, a tighter `line-height` sets
+        // the logo's later lines between the tagline's, and the two collide.
+        assert_eq!(run_lines((290.0, 120.0), (290.0, 84.0), "40px", "28px", &[]), 1);
+        assert_eq!(run_lines((290.0, 84.0), (290.0, 84.0), "28px", "28px", &[]), 0);
+        // Centred, or with a `line-height` or break rule the capture did not
+        // record, the later lines may sit elsewhere too.
+        assert_eq!(run_lines((290.0, 84.0), (290.0, 84.0), "28px", "28px", &[("textAlign", "center")]), 1);
+        assert_eq!(run_lines((290.0, 84.0), (290.0, 84.0), "28px", "28px", &[("wordBreak", "")]), 1);
+        // On one line, only the first line's origin matters.
+        assert_eq!(run_lines((290.0, 56.0), (280.0, 28.0), "28px", "normal", &[("textAlign", "center")]), 0);
     }
 
     /// v0-orbit-internal-app: a KPI label clipped by its squeezed card to the

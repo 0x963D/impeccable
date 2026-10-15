@@ -774,6 +774,9 @@ const __impeccableSnapshot = {
         // `complete` separates an image whose fetch failed from one the
         // browser has not requested yet; both have a naturalWidth of 0.
         if (tag === 'IMG' && typeof el.complete === 'boolean') rec.md.cp = el.complete;
+        // `readyState` 2 or more: a frame is decoded, so the video paints a
+        // picture even where its poster failed or is still loading.
+        if (tag === 'VIDEO' && typeof el.readyState === 'number') rec.md.rs = el.readyState;
       }
       els[id - 1] = rec;
     }

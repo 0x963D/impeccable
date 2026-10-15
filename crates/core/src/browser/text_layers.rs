@@ -539,14 +539,66 @@ pub fn layers_at_text(
 /// it need for the picture to hide what is under it.
 const PICTURE_COVER_MIN_OPACITY: f64 = 0.95;
 
-/// Whether a picture URL names a format that may carry transparency (PNG or
-/// SVG, judged by the path before any query or fragment). The engine cannot
-/// see a picture's alpha, so such a picture is not taken to cover what lies
-/// beneath it.
+/// Whether a picture URL may carry transparency. The engine cannot see a
+/// picture's alpha, so only a format that has none settles it: a JPEG, named
+/// by a `data:image/jpeg` URI or by a path (before any query or fragment,
+/// in any case) ending in `.jpg`, `.jpeg`, `.jpe`, `.jfif`, `.pjpeg` or
+/// `.pjp`. PNG, SVG, WebP, GIF and AVIF can all be transparent, and a URL
+/// that names no format (an image CDN's query, an empty source) is unknown,
+/// so every one of them may be, and such a picture is not taken to cover
+/// what lies beneath it.
 pub(crate) fn url_may_be_transparent(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
+    if let Some(data) = lower.strip_prefix("data:") {
+        let mime = data.split([';', ',']).next().unwrap_or("");
+        return !matches!(mime.trim(), "image/jpeg" | "image/jpg" | "image/pjpeg");
+    }
     let path = lower.split(['?', '#']).next().unwrap_or("");
-    path.ends_with(".png") || path.ends_with(".svg")
+    ![".jpg", ".jpeg", ".jpe", ".jfif", ".pjpeg", ".pjp"].iter().any(|ext| path.ends_with(ext))
+}
+
+/// `el`'s box cut to the overflow clip of every box from its parent up to
+/// and including `top`, axis by axis (`overflow` `hidden`, `clip`, `auto` or
+/// `scroll`, on a box that generates one of its own). Every clip on the way
+/// counts, even one an absolutely positioned box escapes: a smaller box
+/// covers less, which keeps a finding. A clip box the capture did not
+/// measure leaves nothing visible.
+pub(crate) fn visible_through_clips(dom: &dyn Dom, el: ElId, top: ElId) -> crate::browser::Rect {
+    let mut r = dom.rect(el);
+    if el == top {
+        return r;
+    }
+    let mut cur = dom.parent(el);
+    while let Some(c) = cur {
+        if super::painted::clips_contents(&dom.style(c, "display")) {
+            let (ox, oy) = super::painted::overflow_axes(dom, c);
+            let (clip_x, clip_y) = (super::painted::clips(&ox), super::painted::clips(&oy));
+            if clip_x || clip_y {
+                let cr = dom.rect(c);
+                if !cr.all_finite() {
+                    r.left = f64::NAN;
+                    return r;
+                }
+                if clip_x {
+                    r.left = r.left.max(cr.left);
+                    r.x = r.left;
+                    r.right = r.right.min(cr.right);
+                    r.width = (r.right - r.left).max(0.0);
+                }
+                if clip_y {
+                    r.top = r.top.max(cr.top);
+                    r.y = r.top;
+                    r.bottom = r.bottom.min(cr.bottom);
+                    r.height = (r.bottom - r.top).max(0.0);
+                }
+            }
+        }
+        if c == top {
+            break;
+        }
+        cur = dom.parent(c);
+    }
+    r
 }
 
 /// How far the picture's box may sit from the avatar box on each side.
@@ -570,8 +622,10 @@ const AVATAR_MAX_TEXT: usize = 3;
 ///   [`AVATAR_MAX_SIDE`] on either axis or `el`'s text is at most
 ///   [`AVATAR_MAX_TEXT`] characters (initials);
 /// - the picture is an `<img>` the capture saw complete with a size of its
-///   own, whose source does not end in `.svg` or `.png`, sized to cover
-///   (`object-fit` `fill` or `cover`), covering the text within a pixel, and
+///   own, whose source is a JPEG ([`url_may_be_transparent`]), sized to
+///   cover (`object-fit` `fill` or `cover`), whose box, cut to every
+///   overflow clip between it and the sibling ([`visible_through_clips`]),
+///   covers the text within a pixel, and
 ///   which neither it nor any box up to the sibling fades below
 ///   [`PICTURE_COVER_MIN_OPACITY`];
 /// - the sibling is drawn over `el` (neither sets a `z-index`, the sibling
@@ -641,6 +695,9 @@ fn covered_by_a_later_picture(dom: &dyn Dom, el: ElId) -> bool {
             if !matches_host {
                 return false;
             }
+            // A wrapper with `overflow: hidden` narrower than the photo
+            // shows only part of it.
+            let r = visible_through_clips(dom, img, sib);
             let covers = r.all_finite()
                 && r.left <= text.left + 1.0
                 && r.top <= text.top + 1.0
