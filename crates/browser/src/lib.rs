@@ -23,6 +23,10 @@
 //! ([`overlays`]), so every pass and the screenshot see the page a visitor
 //! sees once they dismiss them.
 //!
+//! `detect --cdp` ([`attach`]) runs the same passes over a page of an app
+//! that is already running, attached through its DevTools port instead of
+//! loaded, and leaves that page as it found it.
+//!
 //! Two entry points serve measurement work rather than the CLI.
 //! [`detect_url_evidence`] runs the same scan and also returns what a
 //! reviewer needs to check the findings (the captures and hit-test answers,
@@ -30,6 +34,7 @@
 //! passes over a recorded capture with no browser, so a rule change can be
 //! measured against saved pages.
 
+pub mod attach;
 pub mod cdp;
 pub mod consent;
 pub mod overlays;
@@ -116,6 +121,15 @@ impl UrlEngine for BrowserEngine {
 
     fn detect_url_scan(&self, url: &str, options: &ScanOptions) -> Result<UrlScan, EngineError> {
         detect_url_impl(self, url, options, "networkidle0", 0, None)
+    }
+
+    fn detect_cdp_scan(
+        &self,
+        endpoint: &impeccable_detect::cdp_endpoint::CdpEndpoint,
+        target: Option<&str>,
+        options: &ScanOptions,
+    ) -> Result<UrlScan, EngineError> {
+        attach::detect_cdp(endpoint, target, options)
     }
 
     fn open_shared(&self) -> Option<Box<dyn SharedBrowser + '_>> {
@@ -1107,7 +1121,7 @@ fn scan_page_inner(
     settle_ms: u64,
     viewport: Viewport,
     profile: Option<&DetectorProfile>,
-    mut evidence: Option<(&mut Evidence, &EvidenceRequest)>,
+    evidence: Option<(&mut Evidence, &EvidenceRequest)>,
     consent: &mut ConsentReport,
     notes: &mut Vec<String>,
     overlays: &mut OverlayReport,
@@ -1131,7 +1145,24 @@ fn scan_page_inner(
             std::thread::sleep(Duration::from_millis(settle_ms))
         });
     }
+    scan_loaded(page, url, options, viewport, profile, evidence, consent, notes, overlays)
+}
 
+/// Every pass over a page that is already showing what is to be scanned: a
+/// URL scan's freshly loaded page, or an attached app's page as it stands
+/// ([`attach`]). `viewport` is the page's viewport size.
+#[allow(clippy::too_many_arguments)]
+fn scan_loaded(
+    page: &mut Page<'_>,
+    url: &str,
+    options: &ScanOptions,
+    viewport: Viewport,
+    profile: Option<&DetectorProfile>,
+    mut evidence: Option<(&mut Evidence, &EvidenceRequest)>,
+    consent: &mut ConsentReport,
+    notes: &mut Vec<String>,
+    overlays: &mut OverlayReport,
+) -> Result<Vec<RawResult>, EngineError> {
     // A challenge or error page is not the site: refuse to report on it. Nor
     // is a consent wall, unless the scan keeps the banners: then the banner
     // is what the caller asked to read.
