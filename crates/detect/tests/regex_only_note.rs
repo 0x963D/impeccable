@@ -94,6 +94,41 @@ fn framework_directory_spells_the_dev_server_scan() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn two_framework_directories_get_one_url_each() {
+    let root = std::env::temp_dir().join(format!("impeccable-regex-note-two-{}", std::process::id()));
+    let vite = root.join("vite-app");
+    let next = root.join("next-app");
+    std::fs::create_dir_all(&vite).unwrap();
+    std::fs::create_dir_all(&next).unwrap();
+    std::fs::write(vite.join("vite.config.js"), "export default {};\n").unwrap();
+    std::fs::write(vite.join("App.tsx"), "export const App = () => <p>vite</p>;\n").unwrap();
+    std::fs::write(next.join("next.config.js"), "module.exports = {};\n").unwrap();
+    std::fs::write(next.join("page.tsx"), "export default () => <p>next</p>;\n").unwrap();
+
+    let args: Vec<String> = ["--no-config", "--no-design-system"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain([vite, next].iter().map(|d| d.to_string_lossy().into_owned()))
+        .collect();
+    let (mut io, cap) = Io::captured("", root.clone(), HashMap::new());
+    let engines = Engines {
+        html: &MissingHtmlEngine,
+        url: None,
+    };
+    assert_eq!(run_detect(&args, &mut io, &engines), 0);
+    let err = String::from_utf8(cap.stderr.borrow().clone()).unwrap();
+    // Ports are listed in ascending order, whichever directory came first.
+    assert!(
+        err.ends_with(&format!(
+            "\n4 files scanned with regex matching only (.js, .tsx).\n{RULES}For the full check, scan each running app:\n  npx impeccable detect http://localhost:3000\n  npx impeccable detect http://localhost:5173\n"
+        )),
+        "stderr was: {err:?}"
+    );
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// Stands in for the static HTML engine: finds nothing, so the test sees only
 /// the routing decision.
 struct CleanHtmlEngine;
