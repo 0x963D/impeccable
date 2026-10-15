@@ -141,6 +141,10 @@ impl Raw {
     }
 
     fn call(&mut self, session: Option<&str>, method: &str, params: Value) -> Value {
+        self.try_call(session, method, params).unwrap_or_else(|e| panic!("{method}: {e}"))
+    }
+
+    fn try_call(&mut self, session: Option<&str>, method: &str, params: Value) -> Result<Value, Value> {
         self.next += 1;
         let id = self.next;
         let mut msg = json!({ "id": id, "method": method, "params": params });
@@ -152,23 +156,34 @@ impl Raw {
             let Message::Text(text) = self.ws.read().expect("raw read") else { continue };
             let v: Value = serde_json::from_str(&text).unwrap();
             if v.get("id").and_then(Value::as_u64) == Some(id) {
-                assert!(v.get("error").is_none(), "{method}: {v}");
-                return v["result"].clone();
+                return match v.get("error") {
+                    Some(e) => Err(e.clone()),
+                    None => Ok(v["result"].clone()),
+                };
             }
         }
     }
 
     /// Evaluate in the page's own world, without a user gesture.
     fn eval(&mut self, target: &str, expression: &str) -> Value {
+        self.try_eval(target, expression).unwrap_or_else(|e| panic!("page threw: {e}"))
+    }
+
+    /// [`Raw::eval`], with a page exception or a lost context as an error.
+    fn try_eval(&mut self, target: &str, expression: &str) -> Result<Value, Value> {
         let session = self.call(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true }));
         let session = session["sessionId"].as_str().unwrap().to_string();
-        let out = self.call(
+        let out = self.try_call(
             Some(&session),
             "Runtime.evaluate",
             json!({ "expression": expression, "returnByValue": true, "awaitPromise": true }),
         );
         self.call(None, "Target.detachFromTarget", json!({ "sessionId": session }));
-        out["result"]["value"].clone()
+        let out = out?;
+        match out.get("exceptionDetails") {
+            Some(e) => Err(e.clone()),
+            None => Ok(out["result"]["value"].clone()),
+        }
     }
 
     fn pages(&mut self) -> Vec<Value> {
@@ -182,12 +197,15 @@ impl Raw {
             .collect()
     }
 
-    /// Open `url` in a new tab and wait until it has loaded.
+    /// Open `url` in a new tab and wait until it has loaded. The tab starts
+    /// on `about:blank`, which is already `complete`, so the wait also
+    /// checks that the fixture is the document.
     fn open(&mut self, url: &str, background: bool) -> String {
         let created = self.call(None, "Target.createTarget", json!({ "url": url, "background": background }));
         let target = created["targetId"].as_str().unwrap().to_string();
         let started = Instant::now();
-        while self.eval(&target, "document.readyState") != json!("complete") {
+        let loaded = format!("location.href === {} && document.readyState === 'complete' && !!document.getElementById('list')", json!(url));
+        while self.try_eval(&target, &loaded).ok() != Some(json!(true)) {
             assert!(started.elapsed() < Duration::from_secs(30), "page never loaded");
             std::thread::sleep(Duration::from_millis(100));
         }
