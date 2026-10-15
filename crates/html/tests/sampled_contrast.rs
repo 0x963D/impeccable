@@ -670,6 +670,12 @@ fn a_color_held_in_a_custom_property_after_the_image_is_the_fallback() {
     let css = ".hero { background: url(cutout.png); } p { color: #262421; }";
     let found = site.contrast(css, "<div class=hero><p>Dark copy</p></div>");
     assert!(found.is_empty(), "{found:?}");
+    // A literal color beside a custom property that holds the repeat is
+    // still the fallback color, so the non-covering photo stays off the
+    // ground.
+    let css = ":root { --tile: no-repeat; } .hero { background: url(light.png) #17150f var(--tile); } p { color: #fdfdfd; }";
+    let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]

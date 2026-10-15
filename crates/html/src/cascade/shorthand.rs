@@ -542,6 +542,18 @@ fn color_outside_image(v: &str) -> Option<String> {
         // layer that is a `var()` stays what it was: unknown paint beneath
         // the image, not its color.
         let tokens = join_slashes(split_tokens(&outside).iter().flat_map(|t| unglue(t)).collect());
+        // A literal color beside the `var()` is the color, as it is without
+        // one; the tokens that hold a `var()` are left out of that read so
+        // a fallback inside one (`var(--x, #fff)`) is not taken for it.
+        let plain: Vec<&str> = tokens
+            .iter()
+            .filter(|t| !VAR_ANYWHERE_RE.is_match(t))
+            .map(|t| t.as_str())
+            .collect();
+        let literal = extract_static_color(&plain.join(" "));
+        if !literal.is_empty() {
+            return (!color_only).then_some(literal);
+        }
         let bare: Vec<&String> = tokens.iter().filter(|t| is_bare_var(t)).collect();
         let rest_plain = tokens
             .iter()

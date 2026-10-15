@@ -546,6 +546,35 @@ fn background_longhands_ride_beside_the_expansion() {
             ("backgroundPosition", "0% 0%, 0% 0%")
         ])
     );
+    // A literal color beside the `var()` is the color, whichever comes
+    // first, and a fallback inside a `var()` is not one.
+    assert_eq!(
+        pairs("background", "url(hero.jpg) #17150f var(--tile)"),
+        own(&[
+            ("backgroundRepeat", "var(--tile)"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "#17150f")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(hero.jpg) var(--tile) rgba(0, 0, 0, 0.5)"),
+        own(&[
+            ("backgroundRepeat", "var(--tile)"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "rgba(0, 0, 0, 0.5)")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(hero.jpg) var(--brand, #fff)"),
+        own(&[
+            ("backgroundRepeat", "var(--brand, #fff)"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "var(--brand, #fff)")
+        ])
+    );
     assert_eq!(
         pairs("background", "url(a.png) rgb(var(--r) 0 0)"),
         own(&[
