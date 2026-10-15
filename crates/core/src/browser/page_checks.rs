@@ -3670,6 +3670,50 @@ fn buried_under_answer(dom: &dyn Dom, stack: &[ElId], victim: ElId) -> bool {
     })
 }
 
+/// The layer a curtain footer sits in: `el`'s nearest `sticky` or `fixed`
+/// ancestor (or `el` itself), when it sets a numeric `z-index` of 0 or below,
+/// which puts it under the page's later positioned layers. runlatent.ai's
+/// `footer#footer` is `position: sticky; bottom: 0; z-index: 0` under a
+/// `main` at `z-index: 1` with an opaque fill, so the page uncovers it as
+/// `main` scrolls away. `None` for `z-index: auto` or one not recorded.
+fn curtain_layer(dom: &dyn Dom, el: ElId) -> Option<ElId> {
+    let body = dom.body();
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if Some(c) == body {
+            return None;
+        }
+        if matches!(dom.style(c, "position").as_str(), "sticky" | "fixed") {
+            let z = js::trim(&dom.style(c, "zIndex")).to_string();
+            let n = parse_float(&z);
+            let numeric = !z.is_empty() && z.bytes().all(|b| b.is_ascii_digit() || b == b'-');
+            return (numeric && n.is_finite() && n <= 0.0).then_some(c);
+        }
+        cur = dom.parent(c);
+    }
+    None
+}
+
+/// The fill alpha a box needs to bury a curtain layer under it.
+const CURTAIN_COVER_MIN_ALPHA: f64 = 0.95;
+
+/// Whether the hit-test stack at a point shows `victim`, inside the curtain
+/// layer `layer` ([`curtain_layer`]), under a box outside that layer that
+/// paints an opaque fill: the page laid over a curtain footer. Such a point
+/// shows the page, not the footer's words. `false` when no stack was
+/// recorded or the victim is not in it.
+fn buried_under_the_page(dom: &dyn Dom, stack: &[ElId], victim: ElId, layer: ElId) -> bool {
+    let Some(at) = stack.iter().position(|&e| e == victim) else {
+        return false;
+    };
+    stack[..at].iter().any(|&box_| {
+        !dom.contains(box_, victim)
+            && !dom.contains(layer, box_)
+            && parse_any_color(Some(&dom.style(box_, "backgroundColor")))
+                .is_some_and(|c| c.alpha_or_one() >= CURTAIN_COVER_MIN_ALPHA)
+    })
+}
+
 /// How many ancestors of a hit-test answer text-occlusion asks whether they
 /// are a moving ticker track.
 const MARQUEE_TRACK_MAX_DEPTH: usize = 4;
@@ -3766,6 +3810,7 @@ fn overprints(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
 pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
     let mut seen_victims: Vec<ElId> = Vec::new();
+    let mut curtains: std::collections::HashMap<ElId, bool> = std::collections::HashMap::new();
     // The inline boxes reported for a fill that leaks: there the element is
     // what covers, not what is covered.
     let mut leak_hosts: Vec<ElId> = Vec::new();
@@ -3951,6 +3996,27 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         // sit below the text rather than over it, and cannot be counted. Text
         // it names overlaps the victim whichever of the two is on top.
         let passes_through = ignores_pointer_events(dom, el);
+        // A curtain layer the page covers wherever a probe asks: no point
+        // over any of its text answers with the layer or anything in it.
+        // There the victim's words are buried under the page, not crossed
+        // by the text on it. One point the layer answers (a footer the page
+        // has scrolled off), or one point not answered, keeps every
+        // finding in it.
+        let curtain = curtain_layer(dom, el).filter(|&layer| {
+            *curtains.entry(layer).or_insert_with(|| {
+                let mut asked = 0usize;
+                for t in text_els.iter().filter(|t| t.el == layer || dom.contains(layer, t.el)) {
+                    for (x, y) in occlusion_probe_points(&t.rect, vw, vh) {
+                        asked += 1;
+                        match dom.element_from_point(x, y) {
+                            Some(a) if a != layer && !dom.contains(layer, a) => {}
+                            _ => return false,
+                        }
+                    }
+                }
+                asked > 0
+            })
+        });
         // Each side's glyphs are read as the band they ink where that can
         // be told, the content area otherwise.
         let victim_glyphs = dom
@@ -4016,7 +4082,11 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             }
             // The answer may lie on a layer that buries the victim, not on
             // the victim.
-            if buried_under_answer(dom, &dom.elements_from_point(x, y), el) {
+            let stack = dom.elements_from_point(x, y);
+            if buried_under_answer(dom, &stack, el) {
+                continue;
+            }
+            if curtain.is_some_and(|layer| buried_under_the_page(dom, &stack, el, layer)) {
                 continue;
             }
             // A label at `font-size: 0` (a hidden link's) draws nothing, and
@@ -4039,7 +4109,13 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             let top_own_text = !element_direct_text(dom, top).is_empty()
                 && !super::painted::at_most_1px(&dom.style(top, "fontSize"))
                 && glyphs_may_cover(top_glyphs, victim_glyphs.as_ref(), x, y);
-            let top_in_svg = closest_or_none(dom, top, "svg").is_some();
+            // Under text that ignores pointer events the probe passes
+            // through to what lies beneath, so a graphic it names may be the
+            // art the text is laid on (boardlab.dev's canvas hint panel over
+            // a circuit diagram), as with an opaque box below. An SVG text
+            // element still overlaps the victim whichever is on top.
+            let top_in_svg = closest_or_none(dom, top, "svg").is_some()
+                && (!passes_through || SVG_TEXT_TAGS.contains(&top_tag.as_str()));
             let top_has_text = top_own_text || top_in_svg;
             // A box paints its fill and borders inside its own rect. Where the
             // box the page answered with is not at the point in the capture,
@@ -5986,6 +6062,117 @@ mod tests {
         let f = run("none", Some("Emailadresse eingeben"));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].finding.detail.contains("overlapping text"), "{f:?}");
+    }
+
+    /// runlatent.ai (10048585, 10048718): `footer#footer` is `position:
+    /// sticky; bottom: 0; z-index: 0` under a `main` at `z-index: 1` with an
+    /// opaque fill. Every probe over the footer's links answers the page's
+    /// headings, with the footer under `main` in the stack: a curtain the
+    /// page uncovers as it scrolls away, not text a reader sees collide.
+    #[test]
+    fn text_occlusion_skips_a_curtain_footer_the_page_covers() {
+        let run = |z: &str, page_fill: &str, footer_shows: bool| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            d.inner_width = 390.0;
+            d.inner_height = 844.0;
+            let footer = d.add(Some(body), "footer");
+            d.set_styles(footer, PROBE_BASE);
+            d.set_styles(footer, &[("position", "sticky"), ("zIndex", z), ("backgroundColor", "rgb(43, 70, 249)")]);
+            d.set_rect(footer, 0.0, 90.0, 390.0, 754.0);
+            let privacy = d.add(Some(footer), "a");
+            d.set_styles(privacy, PROBE_BASE);
+            d.set_rect(privacy, 16.0, 700.0, 60.0, 20.0);
+            d.add_text(privacy, "Privacy");
+            let terms = d.add(Some(footer), "a");
+            d.set_styles(terms, PROBE_BASE);
+            d.set_rect(terms, 16.0, 800.0, 60.0, 20.0);
+            d.add_text(terms, "Terms");
+            let main = d.add(Some(body), "main");
+            d.set_styles(main, PROBE_BASE);
+            d.set_styles(main, &[("position", "relative"), ("zIndex", "1"), ("backgroundColor", page_fill)]);
+            // The page covers the whole footer, or stops short of its last
+            // row, which then shows.
+            d.set_rect(main, 0.0, 0.0, 390.0, if footer_shows { 780.0 } else { 13087.0 });
+            let h2 = d.add(Some(main), "h2");
+            d.set_styles(h2, PROBE_BASE);
+            d.set_rect(h2, 16.0, 690.0, 358.0, 40.0);
+            d.add_text(h2, "Watch Latent catch it");
+            let lede = d.add(Some(main), "p");
+            d.set_styles(lede, PROBE_BASE);
+            d.set_rect(lede, 16.0, 600.0, 358.0, 40.0);
+            d.add_text(lede, "Every regression, before your users");
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+                .into_iter()
+                .map(|f| f.finding.detail)
+                .filter(|s| s.contains("\"Privacy\"") || s.contains("\"Terms\""))
+                .collect::<Vec<_>>()
+        };
+        // Both links: one under the page's heading, one under its fill.
+        let base = run("auto", "rgb(10, 11, 16)", false);
+        assert_eq!(base.len(), 2, "{base:?}");
+        assert!(base[0].contains("on an opaque layer (main)"), "{base:?}");
+        // Sticky at z-index 0, or below it: buried under the page.
+        assert!(run("0", "rgb(10, 11, 16)", false).is_empty());
+        assert!(run("-1", "rgb(10, 11, 16)", false).is_empty());
+        // Above the page, or under a page with no opaque fill, it collides.
+        assert_eq!(run("2", "rgb(10, 11, 16)", false).len(), 2);
+        let faint = run("0", "rgba(10, 11, 16, 0.5)", false);
+        assert_eq!(faint.len(), 1, "{faint:?}");
+        assert!(faint[0].contains("\"Privacy\""), "{faint:?}");
+        // Where one of its links shows, the footer is on screen, and the
+        // link the page's text lies on is covered.
+        let shows = run("0", "rgb(10, 11, 16)", true);
+        assert_eq!(shows.len(), 1, "{shows:?}");
+        assert!(shows[0].contains("\"Privacy\""), "{shows:?}");
+    }
+
+    /// boardlab.dev (10047349): the canvas hint panel is `pointer-events:
+    /// none` over a circuit SVG, so the probe passes through the panel's
+    /// text to the drawing under it. A graphic answer cannot be ranked
+    /// against such text; an SVG text answer still overlaps it.
+    #[test]
+    fn text_occlusion_cannot_rank_a_graphic_under_text_that_ignores_pointer_events() {
+        let run = |pointer_events: &str, svg_child: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let canvas = d.add(Some(body), "div");
+            d.set_styles(canvas, PROBE_BASE);
+            d.set_style(canvas, "position", "relative");
+            d.set_rect(canvas, 589.0, 148.0, 496.0, 651.0);
+            let panel = d.add(Some(canvas), "div");
+            d.set_styles(panel, PROBE_BASE);
+            d.set_styles(panel, &[("position", "absolute"), ("pointerEvents", pointer_events)]);
+            d.set_rect(panel, 601.0, 160.0, 240.0, 120.0);
+            let label = d.add(Some(panel), "p");
+            d.set_styles(label, PROBE_BASE);
+            d.set_style(label, "pointerEvents", pointer_events);
+            d.set_rect(label, 614.0, 169.0, 214.0, 16.0);
+            d.add_text(label, "Canvas");
+            // Later in the tree, so the fake hit test answers it first, as
+            // the browser's does when the probe passes through the panel.
+            let svg = d.add(Some(canvas), "svg");
+            d.set_styles(svg, PROBE_BASE);
+            d.set_rect(svg, 589.0, 148.0, 496.0, 651.0);
+            let mark = d.add(Some(svg), svg_child);
+            d.set_styles(mark, PROBE_BASE);
+            d.set_rect(mark, 600.0, 160.0, 300.0, 40.0);
+            if svg_child == "text" {
+                d.add_text(mark, "Input A");
+            }
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+                .into_iter()
+                .map(|f| f.finding.detail)
+                .filter(|s| s.contains("\"Canvas\""))
+                .collect::<Vec<_>>()
+        };
+        let base = run("auto", "path");
+        assert_eq!(base.len(), 1, "{base:?}");
+        assert!(base[0].contains("an SVG graphic"), "{base:?}");
+        assert!(run("none", "path").is_empty());
+        assert_eq!(run("none", "text").len(), 1);
     }
 
     /// ladepeche.fr's stretched link: its transparent `::after` answers for
