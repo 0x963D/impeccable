@@ -106,7 +106,18 @@ pub fn instructions_for_event(event: &Map<String, Value>, self_cmd: &str) -> Opt
                 .get("_completionAck")
                 .and_then(|a| a.get("ok"))
                 == Some(&Value::Bool(true));
-            Some(if ack_ok {
+            let result = event.get("_acceptResult");
+            let refused = result.and_then(|r| r.get("handled")) == Some(&Value::Bool(false));
+            Some(if refused {
+                let err = match result.and_then(|r| r.get("error")) {
+                    Some(v) if truthy(Some(v)) => js_str(Some(v)),
+                    _ => "unknown error".to_string(),
+                };
+                format!(
+                    "Discard did NOT restore the source: {}. If the impeccable-variants wrapper for {} is still in source, replace it with the original element by hand (the VCS diff shows what it replaced). Then poll again.",
+                    err, id
+                )
+            } else if ack_ok {
                 "Original restored and durable completion acknowledged; nothing to do. Poll again.".to_string()
             } else {
                 format!(
@@ -431,5 +442,26 @@ mod tests {
         assert!(lane.contains("read reference/bolder.md before planning"), "{lane}");
         assert!(lane.contains("live.md section 4"), "{lane}");
         assert!(lane.contains("parameter knobs per section 7"), "{lane}");
+    }
+
+    #[test]
+    fn a_refused_discard_never_claims_the_original_was_restored() {
+        let event = |result: Value| {
+            let mut m = Map::new();
+            m.insert("type".into(), json!("discard"));
+            m.insert("id".into(), json!("ab12cd34"));
+            m.insert("_acceptResult".into(), result);
+            m.insert("_completionAck".into(), json!({ "ok": true, "type": "error" }));
+            m
+        };
+        let refused = instructions_for_event(
+            &event(json!({ "handled": false, "file": "src/App.tsx", "error": "Original not found" })),
+            "impeccable",
+        )
+        .unwrap();
+        assert!(refused.starts_with("Discard did NOT restore the source: Original not found."), "{refused}");
+        assert!(!refused.contains("Original restored"), "{refused}");
+        let restored = instructions_for_event(&event(json!({ "handled": true, "file": "src/App.tsx" })), "impeccable").unwrap();
+        assert!(restored.starts_with("Original restored"), "{restored}");
     }
 }
