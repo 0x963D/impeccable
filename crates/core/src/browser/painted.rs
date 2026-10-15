@@ -1062,6 +1062,45 @@ fn is_script_scroll_frame(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_h: f64) ->
         && cr.height >= fold - 1.0
         && has_overflow(dom.scroll_height(p), dom.client_height(p))
         && !capped_by_max_height(dom, p, cr, js::math_max(fold, viewport_h))
+        && in_flow_content_runs_past(dom, p, cr.bottom)
+}
+
+/// How many descendants [`in_flow_content_runs_past`] reads before it stops
+/// and answers yes.
+const IN_FLOW_WALK_BUDGET: usize = 2000;
+
+/// Whether content in `p`'s flow runs past its bottom edge: a descendant,
+/// reached without passing through an absolutely or fixed positioned box,
+/// whose box ends more than a pixel below `bottom`. A scroll library moves
+/// one in-flow wrapper that holds the page. A map holds its markers as
+/// absolutely placed children: chefsspecial.app's Mapbox box (896x800,
+/// `overflow: hidden`) records a scroll height of 1,626 from markers placed
+/// below its edge, and those are clipped, not scrolled to. A box the capture
+/// did not measure, text of `p`'s own, or a walk past
+/// [`IN_FLOW_WALK_BUDGET`] answers yes, which keeps the frame.
+fn in_flow_content_runs_past(dom: &dyn Dom, p: ElId, bottom: f64) -> bool {
+    // Text of its own may be what runs past; the capture measures no text
+    // node, so that keeps the frame too.
+    if has_direct_text_longer_than(dom, p, 0) {
+        return true;
+    }
+    let mut stack = dom.children(p);
+    let mut read = 0usize;
+    while let Some(c) = stack.pop() {
+        read += 1;
+        if read > IN_FLOW_WALK_BUDGET {
+            return true;
+        }
+        if matches!(dom.style(c, "position").as_str(), "absolute" | "fixed") {
+            continue;
+        }
+        let r = dom.rect(c);
+        if !r.all_finite() || r.bottom > bottom + 1.0 {
+            return true;
+        }
+        stack.extend(dom.children(c));
+    }
+    false
 }
 
 /// Whether a box stands at its `max-height`: a "read more" panel held at
@@ -3160,6 +3199,53 @@ mod tests {
         d.set_rect(shell, 0.0, 0.0, 1280.0, 800.0);
         d.el_mut(shell).client_height = 800.0;
         assert_eq!(why(&d, below), None);
+    }
+
+    /// chefsspecial.app (10047562): a Mapbox box 800px tall that hides its
+    /// overflow records a scroll height of 1,626 from markers placed below
+    /// its edge. They are absolutely placed in a static canvas container of
+    /// no height, so nothing in the box's flow runs past it: the markers
+    /// below the edge are clipped. The same box around an in-flow wrapper
+    /// that runs past it is a scroll frame.
+    #[test]
+    fn a_map_whose_overflow_is_placed_markers_is_not_a_scroll_frame() {
+        let (mut d, body) = page();
+        let map = d.add(Some(body), "div");
+        d.set_styles(map, &[("display", "block"), ("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(map, 0.0, 0.0, 896.0, 800.0);
+        d.el_mut(map).client_height = 800.0;
+        d.el_mut(map).scroll_height = Some(1626.0);
+        let canvas_box = d.add(Some(map), "div");
+        d.set_style(canvas_box, "display", "block");
+        d.set_rect(canvas_box, 0.0, 0.0, 896.0, 0.0);
+        let canvas = d.add(Some(canvas_box), "canvas");
+        d.set_style(canvas, "position", "absolute");
+        d.set_rect(canvas, 0.0, 0.0, 896.0, 800.0);
+        let marker = d.add(Some(canvas_box), "div");
+        d.set_style(marker, "position", "absolute");
+        d.set_rect(marker, 147.0, 860.0, 56.0, 56.0);
+        // The marker's count sits in a static box inside it, which is in
+        // the marker's flow, not the map's.
+        let pin = d.add(Some(marker), "div");
+        d.set_rect(pin, 165.0, 878.0, 20.0, 20.0);
+        let count = d.add(Some(pin), "div");
+        d.set_rect(count, 165.0, 878.0, 20.0, 20.0);
+        d.add_text(count, "12");
+        assert_eq!(why(&d, count), Some(Unpainted::ClippedOut));
+
+        // An in-flow wrapper that runs past the box makes it a frame again,
+        // and the same marker is kept.
+        let content = d.add(Some(map), "div");
+        d.set_rect(content, 0.0, 0.0, 896.0, 1626.0);
+        assert_eq!(why(&d, count), None);
+        // So does one the capture did not measure.
+        d.set_rect(content, f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+        assert_eq!(why(&d, count), None);
+        // And text the box holds of its own.
+        d.set_rect(content, 0.0, 0.0, 896.0, 400.0);
+        assert_eq!(why(&d, count), Some(Unpainted::ClippedOut));
+        d.add_text(map, "Loading the map of every restaurant near you");
+        assert_eq!(why(&d, count), None);
     }
 
     /// smooth-scrollbar and Locomotive Scroll: a viewport-tall wrapper that
