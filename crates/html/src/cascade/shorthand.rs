@@ -491,7 +491,8 @@ static BG_ATTACHMENT_OR_BOX_RE: Lazy<Regex> = Lazy::new(|| {
 /// Whether a value names background geometry rather than a color: repeat,
 /// position, or size tokens (with or without the size slash), attachment,
 /// or box keywords. What a shorthand's bare `var()` turned out to hold when
-/// the cascade stored it in the color slot too.
+/// the cascade stored it in the color slot too; the compute loop then
+/// stores `transparent` there instead.
 pub fn names_background_geometry(value: &str) -> bool {
     let tokens = join_slashes(split_tokens(value).iter().flat_map(|t| unglue(t)).collect());
     !tokens.is_empty()
@@ -535,10 +536,11 @@ fn color_outside_image(v: &str) -> Option<String> {
         // One bare `var()` token beside the image may hold the color, the
         // only slot the expansion never reads on this side; one glued to
         // the size slash is the position, and one inside another function
-        // is not read. The compute loop resolves it, and the walk reads a
-        // repeat, position, or size it turns out to hold as no color at
-        // all. A whole final layer that is a `var()` stays what it was:
-        // unknown paint beneath the image, not its color.
+        // is not read. The compute loop resolves it, and a repeat,
+        // position, or size it turns out to hold computes as `transparent`
+        // for every reader (`color_slot_or_transparent`). A whole final
+        // layer that is a `var()` stays what it was: unknown paint beneath
+        // the image, not its color.
         let tokens = join_slashes(split_tokens(&outside).iter().flat_map(|t| unglue(t)).collect());
         let bare: Vec<&String> = tokens.iter().filter(|t| is_bare_var(t)).collect();
         let rest_plain = tokens

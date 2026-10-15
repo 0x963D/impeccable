@@ -5,7 +5,6 @@
 //! branches only (`DETECTOR_IS_BROWSER === false`).
 
 use crate::cascade::csstree::strings::{decode_string, decode_url};
-use crate::cascade::shorthand::names_background_geometry;
 use crate::cascade::values::{css_call_end, css_string_end, extract_static_color};
 use crate::cascade::StyleValues;
 use crate::dom::StaticElement;
@@ -910,14 +909,7 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
         return LevelPaint::Stop;
     }
     let bg = level_background_color(cur, style, None);
-    // A shorthand's bare `var()` after its image is stored in the color
-    // slot as well as the repeat slot (the expansion reads no color from
-    // that side); resolved to a repeat, position, size, attachment, or box
-    // token it was the latter, and the shorthand named no color.
-    if bg.is_none()
-        && !is_no_paint_color_value(sv_opt(style, "backgroundColor"))
-        && !names_background_geometry(sv(style, "backgroundColor"))
-    {
+    if bg.is_none() && !is_no_paint_color_value(sv_opt(style, "backgroundColor")) {
         return LevelPaint::Stop;
     }
     let color = bg.filter(|c| a_gt(c, 0.1));

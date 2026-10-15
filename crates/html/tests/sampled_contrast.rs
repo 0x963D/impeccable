@@ -673,6 +673,25 @@ fn a_color_held_in_a_custom_property_after_the_image_is_the_fallback() {
 }
 
 #[test]
+fn a_geometry_token_in_the_color_slot_hides_no_gradient() {
+    let site = Site::new("var-geometry");
+    // The custom property held the repeat, not a color: the color slot
+    // computes as `transparent`, and the analytic path still reads the
+    // opaque gradient under the faint text, as it did before the slot
+    // existed. An unresolved property leaves the declaration invalid in a
+    // browser, which paints no gradient, so that case stays silent.
+    let css = ":root { --tile: no-repeat; } .x { background: linear-gradient(#fff, #fff) var(--tile); color: #eee; }";
+    let found = site.contrast(css, "<p class=x>Faint copy</p>");
+    assert!(
+        found.len() == 1 && !found[0].starts_with("sampled"),
+        "{found:?}"
+    );
+    let css = ".x { background: linear-gradient(#fff, #fff) var(--tile); color: #eee; }";
+    let found = site.contrast(css, "<p class=x>Faint copy</p>");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
 fn an_escaped_paren_in_a_file_name_opens_no_call() {
     let site = Site::new("escaped-paren");
     site.png("icon(1).png", 24, 24, LIGHT);
