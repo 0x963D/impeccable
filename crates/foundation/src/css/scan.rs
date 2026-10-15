@@ -342,49 +342,89 @@ re!(
     format!(r"{}(?:x|y|z|3d)?\([^)]*\)", ci("translate"))
 );
 
-/// Whether a keyframes body moves its box or changes its height, read from
-/// the steps that declare it: two steps that declare a translation (in
-/// `transform` or `translate`, `none` counting as none) and disagree on it,
-/// or two that declare different `height`s. A float (imageto3d.studio's
-/// `library-node-float`, `transform: none` to `translateY(-14px)`) and a
-/// waveform bar (juskoe's `wavePulse`, `height: 4px` to `16px`) fade as they
-/// go, but neither is a pulse. A translation every step repeats
-/// (`translate(-50%, -50%) scale(1.4)`, a centred ring) stays put, and a
-/// step that declares nothing leaves the reading as it was.
-fn keyframes_move_or_resize(body: &str) -> bool {
-    let mut translations: Vec<String> = Vec::new();
-    let mut heights: Vec<String> = Vec::new();
-    for step in KEYFRAME_STEP_BLOCK_RE.captures_iter(body) {
-        let decls = parse_css_decl_block(&step[2]);
-        let mut moved: Option<String> = None;
-        for prop in ["transform", "translate"] {
-            if let Some(v) = decls.get(prop) {
-                let v = js::to_lower_case(js::trim(v));
-                let part: Vec<String> = if prop == "translate" {
-                    if v == "none" { Vec::new() } else { vec![WS_RUN_RE.replace_all(&v, " ").into_owned()] }
-                } else {
-                    TRANSLATE_FN_RE.find_iter(&v).map(|m| WS_RUN_RE.replace_all(m.as_str(), " ").into_owned()).collect()
-                };
-                let acc = moved.get_or_insert_with(String::new);
-                for p in part {
-                    acc.push_str(&p);
-                    acc.push(';');
+/// How far a keyframe step may move its box before the step travels, in px.
+const PULSE_TRAVEL_MIN_PX: f64 = 4.0;
+
+/// A length in px for a translation component: any zero (`0`, `0px`, `0%`)
+/// is 0, a px / rem / em length converts, and anything else (a non-zero
+/// percentage, `calc()`) is unknown.
+fn translate_component_px(value: &str) -> Option<f64> {
+    let v = js::trim(value);
+    if is_zero_offset(Some(v)) {
+        return Some(0.0);
+    }
+    css_length_to_px(v)
+}
+
+/// The translation a step declares, as (x, y, z) in px: the sum of the
+/// `translate*()` functions in its `transform` plus its `translate`, `none`
+/// or a transform without one being no translation. `None` when the step
+/// declares neither property or a component cannot be read.
+fn step_translation(decls: &DeclMap) -> Option<[f64; 3]> {
+    let transform = decls.get("transform").map(|v| js::to_lower_case(js::trim(v)));
+    let translate = decls.get("translate").map(|v| js::to_lower_case(js::trim(v)));
+    if transform.is_none() && translate.is_none() {
+        return None;
+    }
+    let mut out = [0.0f64; 3];
+    if let Some(t) = &transform {
+        for m in TRANSLATE_FN_RE.find_iter(t) {
+            let f = m.as_str();
+            let open = f.find('(')?;
+            let name = &f[..open];
+            let args: Vec<&str> = f[open + 1..f.len() - 1].split(',').map(js::trim).collect();
+            let px = |i: usize| args.get(i).map_or(Some(0.0), |a| translate_component_px(a));
+            match name {
+                "translatex" => out[0] += px(0)?,
+                "translatey" => out[1] += px(0)?,
+                "translatez" => out[2] += px(0)?,
+                _ => {
+                    out[0] += px(0)?;
+                    out[1] += px(1)?;
+                    out[2] += px(2)?;
                 }
             }
         }
-        if let Some(m) = moved {
-            if !translations.contains(&m) {
-                translations.push(m);
-            }
-        }
-        if let Some(h) = decls.get("height") {
-            let h = js::to_lower_case(js::trim(h));
-            if !heights.contains(&h) {
-                heights.push(h);
-            }
+    }
+    if let Some(t) = translate.filter(|t| t != "none") {
+        for (i, part) in t.split_ascii_whitespace().take(3).enumerate() {
+            out[i] += translate_component_px(part)?;
         }
     }
-    translations.len() > 1 || heights.len() > 1
+    Some(out)
+}
+
+/// Whether a keyframes body moves its box or changes its height, read from
+/// the steps that declare it. It moves when two steps' translations, read
+/// in px, differ by [`PULSE_TRAVEL_MIN_PX`] or more on an axis: a float
+/// (imageto3d.studio's `library-node-float`, `transform: none` to
+/// `translateY(-14px)`). A centred ring that repeats `translate(-50%, -50%)`
+/// at every step, a `translateZ(0)` layer hint, a dot that breathes a
+/// pixel up and a typing indicator that bobs 2px do not travel; neither
+/// does a translation that cannot be read (a percentage that changes). It
+/// resizes when two steps declare different `height`s and the same `width`
+/// (or none): a waveform bar (juskoe's `wavePulse`, `height: 4px` to
+/// `16px`). A ripple that grows both sides is a ping, and a step that
+/// declares nothing leaves the reading as it was.
+fn keyframes_move_or_resize(body: &str) -> bool {
+    let mut translations: Vec<[f64; 3]> = Vec::new();
+    let mut sizes: Vec<(String, Option<String>)> = Vec::new();
+    for step in KEYFRAME_STEP_BLOCK_RE.captures_iter(body) {
+        let decls = parse_css_decl_block(&step[2]);
+        if let Some(t) = step_translation(&decls) {
+            translations.push(t);
+        }
+        if let Some(h) = decls.get("height") {
+            let norm = |v: &str| js::to_lower_case(&v.split_ascii_whitespace().collect::<String>());
+            sizes.push((norm(h), decls.get("width").map(|w| norm(w))));
+        }
+    }
+    let travels = translations.iter().any(|a| {
+        translations.iter().any(|b| (0..3).any(|i| (a[i] - b[i]).abs() >= PULSE_TRAVEL_MIN_PX))
+    });
+    let resizes = sizes.iter().any(|(h, _)| *h != sizes[0].0)
+        && sizes.iter().all(|(_, w)| *w == sizes[0].1);
+    travels || resizes
 }
 
 /// JS: checks.mjs#collectPulseKeyframes (Map name -> pulses?)

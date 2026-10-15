@@ -3273,9 +3273,8 @@ mod tests {
         assert_eq!(m.entries(), &[("n".to_string(), true)]);
     }
 
-    /// observations-1004 row 25: keyframes that move their box or change
-    /// its height are not a pulse, however they fade. A translation every
-    /// step repeats (a centred ring) still pulses.
+    /// observations-1004 row 25: keyframes that move their box 4px or more,
+    /// or change its height alone, are not a pulse, however they fade.
     #[test]
     fn pulse_keyframes_that_move_or_resize_are_not_pulses() {
         let pulses = |css: &str| collect_pulse_keyframes(css).entries()[0].1;
@@ -3284,17 +3283,28 @@ mod tests {
             "@keyframes f { 0% { opacity: 0.35; transform: none; } 50% { opacity: 0.55; transform: translateY(-14px); } 100% { opacity: 0.35; transform: none; } }"
         ));
         assert!(!pulses("@keyframes f { 0%, 100% { opacity: .4; translate: 0 0 } 50% { opacity: 1; translate: 0 -8px } }"));
+        assert!(!pulses("@keyframes f { 0% { opacity: 1; transform: translate3d(0, 0, 0) } 50% { opacity: .5; transform: translate3d(0, 0.5rem, 0) } }"));
         // juskoe's wavePulse.
         assert!(!pulses(
             "@keyframes w { 0% { opacity: 0.4; height: 4px; } 50% { opacity: 1; height: 16px; } 100% { opacity: 0.4; height: 4px; } }"
         ));
-        // A centred ring: the translation is the same at every step.
+        // Review of round 11: real pulses that must stay pulses.
+        // A centred ring, its translation spelled two ways.
         assert!(pulses(
-            "@keyframes r { 0% { transform: translate(-50%, -50%) scale(1); opacity: 1 } 100% { transform: translate(-50%,  -50%) scale(2.4); opacity: 0 } }"
+            "@keyframes r { 0% { transform: translate(-50%,-50%) scale(1); opacity: 1 } 100% { transform: translate(-50%, -50%) scale(2.2); opacity: 0 } }"
         ));
+        // A GPU layer hint against no translation.
+        assert!(pulses("@keyframes g { 0%,100% { transform: translateZ(0) scale(1) } 50% { transform: scale(1.4); opacity: .4 } }"));
+        // A ripple that grows both sides.
+        assert!(pulses("@keyframes p { 0% { width: 10px; height: 10px; opacity: 1 } 100% { width: 30px; height: 30px; opacity: 0 } }"));
+        // An online dot that breathes a pixel, and a typing indicator's 2px bob.
+        assert!(pulses("@keyframes b { 0%,100% { opacity: 1; transform: translateY(0) } 50% { opacity: .5; transform: translateY(-1px) } }"));
+        assert!(pulses("@keyframes ty { 0%,60%,100% { opacity: .35; transform: none } 30% { opacity: 1; transform: translateY(-2px) } }"));
+        // A percentage that changes cannot be read, and decides nothing.
+        assert!(pulses("@keyframes q { 0% { transform: translate(-50%, -50%); opacity: 1 } 100% { transform: translate(-50%, -60%); opacity: 0 } }"));
         // One height, or one step that translates, decides nothing.
         assert!(pulses("@keyframes h { 0%, 100% { opacity: .4; height: 8px } 50% { opacity: 1 } }"));
-        assert!(pulses("@keyframes s { 0% { opacity: 1 } 50% { opacity: .5; transform: translateY(1px) } }"));
+        assert!(pulses("@keyframes s { 0% { opacity: 1 } 50% { opacity: .5; transform: translateY(6px) } }"));
     }
 
     /// observations-1004 row 25 (juskoe 10047255): a pulsing box twice as

@@ -175,14 +175,6 @@ fn text_buried_under_the_answering_layer_is_not_overlapped() {
 }
 
 #[test]
-fn a_full_bleed_surface_is_not_an_outer_card() {
-    let Some(engine) = engine() else { return };
-    let port = serve();
-    let found = findings(&engine, port, "nested-cards-full-bleed.html", "nested-cards");
-    assert_cases(&found, &["flag-inset-tier"], &["pass-full-bleed-tier"], "nested-cards");
-}
-
-#[test]
 fn table_cells_are_not_cards() {
     let Some(engine) = engine() else { return };
     let port = serve();

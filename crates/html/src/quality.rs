@@ -332,7 +332,7 @@ const FLUSH_SKIP_TAGS: &[&str] = &[
     "THEAD", "TR", "TD", "TH",
 ];
 
-const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"btn\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
+const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
 const EXEMPT_CONTEXT: &str = "pre, code, kbd, samp, var, svg, [aria-hidden=\"true\"], [class*=\"terminal\" i], [class*=\"console\" i], [class*=\"code\" i], [class*=\"mock\" i], [class*=\"editor\" i], [class*=\"syntax\" i], [class*=\"diff\" i]";
 const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"]";
 
@@ -363,8 +363,32 @@ fn is_in_control(el: &StaticElement<'_>) -> bool {
     }
     false
 }
-/// A class that names a button.
-const BUTTON_CLASS: &str = "[class*=\"btn\" i]";
+/// Whether `el` is drawn as a button by its class, as the browser engine
+/// reads it: a class token `btn` or one ending in `-btn` / `_btn`, on the
+/// text's own box or a box around it holding no more text than one
+/// control, at most three boxes up, and the text is not fine print.
+fn is_button_label(el: &StaticElement<'_>) -> bool {
+    let names_button = |cls: &str| {
+        cls.split_ascii_whitespace().any(|token| {
+            let t = js::to_lower_case(token);
+            t == "btn" || t.ends_with("-btn") || t.ends_with("_btn")
+        })
+    };
+    let mut cur = Some(*el);
+    for _ in 0..3 {
+        let Some(c) = cur else { return false };
+        if !(c.contains(el) && el.contains(&c))
+            && utf16_len(js::trim(&collapse_ws(&c.text_content()))) > FOCUSABLE_CONTROL_MAX_CHARS
+        {
+            return false;
+        }
+        if c.get_attribute("class").is_some_and(|cls| names_button(cls)) {
+            return !crate::text_context::is_fine_print(el);
+        }
+        cur = c.parent_element();
+    }
+    false
+}
 const FURNITURE_ELEMENTS: &str = "nav, [role=\"navigation\"], td, th, [role=\"gridcell\"], [role=\"cell\"], caption, figcaption, dt, dd, footer";
 /// Class markers of page furniture. As in the browser engine, they are not
 /// read off `html`, which holds a page's script state flags
@@ -709,7 +733,7 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
             "caption",
             "figcaption",
         ];
-        let in_ui_context = el.closest(TINY_TEXT_UI_CONTEXT).is_some();
+        let in_ui_context = el.closest(TINY_TEXT_UI_CONTEXT).is_some() || is_button_label(el);
         let is_uppercase = sv_opt(style, "textTransform") == Some("uppercase");
         if !skip_tags.contains(&tag)
             && !in_ui_context
@@ -756,7 +780,7 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     UI_TEXT_FLOOR_PX
                 };
                 // A 0.1px tolerance under each floor, as the browser engine.
-                let drawn_as_button = el.closest(BUTTON_CLASS).is_some();
+                let drawn_as_button = is_button_label(el);
                 if is_under_ui_text_floor(font_size, floor)
                     && (is_interactive || is_furniture || drawn_as_button || dt_len <= 20)
                 {

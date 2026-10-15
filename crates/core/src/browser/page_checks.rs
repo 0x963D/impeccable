@@ -410,21 +410,6 @@ pub fn is_card_like_dom(dom: &dyn Dom, el: ElId) -> bool {
     card_edge_sides(dom, el, &layers) >= 3 || fill_differs_from_surface(dom, el)
 }
 
-/// Whether a card-like box is a band of the page's surface: it spans the
-/// viewport from edge to edge (its left edge within 1px of the viewport's,
-/// its width at least 98% of it) and is card-like by its fill alone, with
-/// no painted edge on three sides. Unknown geometry spans nothing, and a
-/// full-width box outlined on every side stays a card.
-fn is_page_surface_band(dom: &dyn Dom, el: ElId) -> bool {
-    let vw = dom.inner_width();
-    let rect = dom.rect(el);
-    if !(vw > 0.0 && rect.all_finite() && rect.left.abs() <= 1.0 && rect.width >= vw * 0.98) {
-        return false;
-    }
-    let layers = crate::checks::measures::parse_shadow_layers(&dom.style(el, "boxShadow"));
-    card_edge_sides(dom, el, &layers) < 3
-}
-
 /// Whether `el` shows a border on any side (half a pixel wide or more, in a
 /// style that draws and a colour that is not transparent) or casts a shadow.
 /// A nested card needs one of the two: a rounded box that paints only a fill
@@ -794,8 +779,8 @@ fn is_figure_box(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
 /// terminal transcript, a request printed as code. A stack of rows set in a
 /// monospace face (a list of providers with toggles, a table of fields) is
 /// ordinary text and controls and keeps reporting, unless the rows stand
-/// one under another, each is one run, and they read as code (a sample
-/// written one line per block), and so does any box on a
+/// one under another, each is one run, and most of them read as a line of
+/// code ([`row_reads_as_code`]; a sample written one line per block), and so does any box on a
 /// page whose outer card is set in a monospace face itself. The block is the
 /// box's main child only when the box holds no control but its own chrome (a
 /// copy button, an icon button such as a code window's "more options" menu):
@@ -880,14 +865,33 @@ fn is_output_block(dom: &dyn Dom, el: ElId, outer: ElId) -> bool {
                 let (a, b) = (dom.rect(nodes[pair[0]]), dom.rect(nodes[pair[1]]));
                 a.height > 0.0 && b.height > 0.0 && b.top >= a.bottom - 1.0
             });
+            let code_rows = rows.iter().filter(|&&r| row_reads_as_code(&dom.text_content(nodes[r]))).count();
             rows.len() >= 2
                 && stacked
                 && text[i] == rows.iter().map(|&r| text[r]).sum::<usize>()
                 && rows.iter().all(|&r| run[r] as f64 >= text[r] as f64 * 0.8)
-                && crate::checks::text_rules::reads_as_code(&dom.text_content(node))
+                && code_rows * 2 > rows.len()
         }
     })
 }
+
+/// Whether one row of a stacked sample reads as a line of source code: it
+/// assigns (`=`), opens or closes a block (`{`, `}`), calls something
+/// (`name(...)`), ends a statement (`;`) or is a `//` comment. A quote, an
+/// underscore or a `>` alone do not: `Added "dark mode"`, `user_id` and
+/// `Settings > Billing` are labels set in a monospace face.
+fn row_reads_as_code(text: &str) -> bool {
+    let t = js::trim(text);
+    t.contains('=')
+        || t.contains('{')
+        || t.contains('}')
+        || t.ends_with(';')
+        || t.starts_with("//")
+        || CALL_RE.is_match(t)
+}
+
+static CALL_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"[A-Za-z_$][A-Za-z0-9_$]*\([^()]*\)").expect("CALL_RE"));
 
 /// A media player that is the box's main child. The box holds a visible
 /// `<audio>` or `<video>` (drawn with its own controls, or covering 40% of
@@ -1019,11 +1023,7 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
         }
         let mut parent = dom.parent(el);
         while let Some(p) = parent {
-            // A rounded fill that spans the viewport edge to edge is the
-            // page's surface, not an outer card (runlatent.ai's cream
-            // `section.sheet`, 1280 wide at 1280, holding the pricing
-            // cards). The climb goes on past it.
-            if is_card_like_dom(dom, p) && !is_page_surface_band(dom, p) {
+            if is_card_like_dom(dom, p) {
                 // A panel not painted at capture (a closed mega-nav panel
                 // held at `visibility: hidden`) is not a card anyone sees,
                 // a band along the card's own edges is part of it, and a
@@ -3096,9 +3096,15 @@ fn is_table_part(dom: &dyn Dom, el: ElId) -> bool {
     )
 }
 
-/// How far the scroller's clip edge must sit inside the viewport before a
-/// card at that edge has the page's gutter around it, in px.
-const EDGE_FLUSH_PAGE_GUTTER_PX: f64 = 12.0;
+/// The range of a page's side gutter, in px: a scroller whose clip edge sits
+/// this far inside the viewport shows a card at that edge with the page's
+/// gutter around it. Further in (a desktop scroller in a centred column)
+/// the gutter is not what frames the card, and it is judged as before.
+const EDGE_FLUSH_PAGE_GUTTER_PX: (f64, f64) = (12.0, 48.0);
+
+fn in_page_gutter(inset: f64) -> bool {
+    (EDGE_FLUSH_PAGE_GUTTER_PX.0..=EDGE_FLUSH_PAGE_GUTTER_PX.1).contains(&inset)
+}
 
 /// The distance from the viewport's left and right edges to the scroller's,
 /// on each side where nothing draws an edge at the scroller's clip edge (no
@@ -3110,18 +3116,26 @@ fn scroller_page_insets(dom: &dyn Dom, scroller: ElId, rect: &Rect) -> (f64, f64
     if !(vw > 0.0) || !rect.all_finite() {
         return (0.0, 0.0);
     }
-    let fill = parse_any_color(Some(&dom.style(scroller, "backgroundColor"))).is_some_and(|c| c.alpha_or_one() > 0.0)
-        || {
-            let image = dom.style(scroller, "backgroundImage");
-            !image.is_empty() && image != "none"
-        };
-    if fill {
+    // A fill, a background image or a visible shadow draws the box's edge.
+    let paints_surface = |el: ElId| {
+        parse_any_color(Some(&dom.style(el, "backgroundColor"))).is_some_and(|c| c.alpha_or_one() > 0.0)
+            || {
+                let image = dom.style(el, "backgroundImage");
+                !image.is_empty() && image != "none"
+            }
+            || crate::checks::measures::parse_shadow_layers(&dom.style(el, "boxShadow")).iter().any(|l| {
+                l.alpha >= crate::checks::measures::FAINT_PAINT_ALPHA
+                    && (l.x != 0.0 || l.y != 0.0 || l.blur > 0.0 || l.spread != 0.0)
+            })
+    };
+    if paints_surface(scroller) {
         return (0.0, 0.0);
     }
     let border = |el: ElId, side: &str| style_px(dom, el, &format!("border{side}Width")) > 0.0;
     // A panel the scroller fills with no padding draws its edge at the
     // scroller's clip edge: an ancestor (up to six levels) whose edge on that
-    // side lies within 2px of the scroller's, with a border there or a fill.
+    // side lies within 2px of the scroller's, with a border there, a fill, a
+    // background image or a shadow.
     let panel_edge = |side: &str| {
         let mut cur = dom.parent(scroller);
         for _ in 0..6 {
@@ -3131,10 +3145,7 @@ fn scroller_page_insets(dom: &dyn Dom, scroller: ElId, rect: &Rect) -> (f64, f64
             }
             let r = dom.rect(a);
             let at_edge = if side == "Left" { (r.left - rect.left).abs() <= 2.0 } else { (r.right - rect.right).abs() <= 2.0 };
-            if at_edge
-                && (border(a, side)
-                    || parse_any_color(Some(&dom.style(a, "backgroundColor"))).is_some_and(|c| c.alpha_or_one() > 0.0))
-            {
+            if at_edge && (border(a, side) || paints_surface(a)) {
                 return true;
             }
             cur = dom.parent(a);
@@ -3249,11 +3260,11 @@ pub fn check_edge_flush_cards_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             let flush_right = left_gutter >= 6.0
                 && right_gap < 8.0
                 && right_gap > -24.0
-                && !(right_gap >= 0.0 && right_inset >= EDGE_FLUSH_PAGE_GUTTER_PX);
+                && !(right_gap >= 0.0 && in_page_gutter(right_inset));
             let flush_left = right_gap >= 6.0
                 && left_gutter < 8.0
                 && left_gutter > -24.0
-                && !(left_gutter >= 0.0 && left_inset >= EDGE_FLUSH_PAGE_GUTTER_PX);
+                && !(left_gutter >= 0.0 && in_page_gutter(left_inset));
             if !flush_right && !flush_left {
                 continue;
             }
@@ -5907,42 +5918,6 @@ mod tests {
         assert!(check_edge_flush_cards_dom(&d).iter().all(|f| f.el != Some(table)), "table headers");
     }
 
-    /// observations-1004 row 7 (runlatent.ai 10048682): a rounded fill that
-    /// spans the viewport is the page's surface, so the pricing cards on it
-    /// are not nested. Inset from the viewport, or outlined on every side,
-    /// it is an outer card.
-    #[test]
-    fn nested_cards_skip_a_full_bleed_surface() {
-        let build = |left: f64, width: f64, outlined_sheet: bool| {
-            let mut d = FakeDom::new();
-            d.inner_width = 1280.0;
-            let (_h, body) = d.with_page();
-            d.set_style(body, "backgroundColor", "rgb(14, 14, 14)");
-            let sheet = d.add(Some(body), "section");
-            d.set_styles(
-                sheet,
-                &[
-                    ("borderRadius", "28px 28px 32px 32px"),
-                    ("backgroundColor", "rgb(245, 245, 242)"),
-                    ("backgroundImage", "none"),
-                    ("boxShadow", "none"),
-                    ("position", "static"),
-                ],
-            );
-            if outlined_sheet {
-                outlined(&mut d, sheet, "28px");
-                d.set_style(sheet, "backgroundColor", "rgb(245, 245, 242)");
-            }
-            d.set_rect(sheet, left, 375.0, width, 3000.0);
-            d.add_text(sheet, "Monthly Yearly two months free");
-            outlined_card(&mut d, sheet, (52.0, 516.0, 384.0, 786.0));
-            check_layout(&d).len()
-        };
-        assert_eq!(build(0.0, 1280.0, false), 0, "a full-bleed sheet");
-        assert_eq!(build(24.0, 1232.0, false), 1, "a sheet inset from the viewport");
-        assert_eq!(build(0.0, 1280.0, true), 1, "a full-width box outlined on every side");
-    }
-
     /// observations-1004 row 28 (w3c.github.io 10046208): a column that
     /// only wraps a navigation rail is left out of the fold test like the
     /// rail itself, whatever heading the rail carries.
@@ -6046,6 +6021,55 @@ mod tests {
         };
         assert_eq!(in_panel(15.0), 1, "the panel's border sits at the clip edge");
         assert_eq!(in_panel(4.0), 0, "the panel's border sits 12px out");
+        // A shadow-only or gradient panel draws its edge too, and so does a
+        // scroller's own shadow.
+        let drawn_by = |on_scroller: bool, prop: &str, value: &str| {
+            let mut d = FakeDom::new();
+            d.inner_width = 390.0;
+            let (_h, body) = d.with_page();
+            let panel = d.add(Some(body), "div");
+            d.set_rect(panel, 16.0, 90.0, 358.0, 220.0);
+            let sc = d.add(Some(panel), "div");
+            d.set_styles(sc, &[("overflowX", "auto"), ("overflow", "auto")]);
+            d.set_rect(sc, 16.0, 100.0, 358.0, 200.0);
+            d.set_style(if on_scroller { sc } else { panel }, prop, value);
+            {
+                let e = d.el_mut(sc);
+                e.client_width = 358.0;
+                e.scroll_width = 900.0;
+            }
+            for x in [20.0, 292.0] {
+                let card = d.add(Some(sc), "article");
+                d.set_styles(card, &[("backgroundColor", "rgb(255, 255, 255)")]);
+                d.set_rect(card, x, 110.0, 260.0, 150.0);
+            }
+            check_edge_flush_cards_dom(&d).len()
+        };
+        let shadow = "rgba(0, 0, 0, 0.12) 0px 4px 16px 0px";
+        assert_eq!(drawn_by(false, "boxShadow", shadow), 1, "a shadow-only panel");
+        assert_eq!(drawn_by(false, "backgroundImage", "linear-gradient(rgb(250, 250, 250), rgb(240, 240, 240))"), 1, "a gradient panel");
+        assert_eq!(drawn_by(true, "boxShadow", shadow), 1, "the scroller's own shadow");
+        assert_eq!(drawn_by(false, "boxShadow", "none"), 0, "an unpainted panel");
+
+        // Past the gutter range (a desktop scroller in a centred column) the
+        // card is judged as before.
+        let mut d = FakeDom::new();
+        d.inner_width = 1280.0;
+        let (_h, body) = d.with_page();
+        let sc = d.add(Some(body), "div");
+        d.set_styles(sc, &[("overflowX", "auto"), ("overflow", "auto")]);
+        d.set_rect(sc, 90.0, 100.0, 1100.0, 200.0);
+        {
+            let e = d.el_mut(sc);
+            e.client_width = 1100.0;
+            e.scroll_width = 2400.0;
+        }
+        for x in [94.0, 466.0, 838.0, 1210.0] {
+            let card = d.add(Some(sc), "article");
+            d.set_styles(card, &[("backgroundColor", "rgb(255, 255, 255)")]);
+            d.set_rect(card, x, 110.0, 360.0, 150.0);
+        }
+        assert_eq!(check_edge_flush_cards_dom(&d).len(), 1, "90px in: not the page's gutter");
     }
 
     #[test]
@@ -7720,6 +7744,19 @@ mod tests {
         d.set_styles(nested, &[("display", "block"), ("fontFamily", "\"Geist Mono\", monospace")]);
         d.add_text(nested, "a block of its own inside a row, longer than the row's own text");
         assert_eq!(check_layout(&d).len(), 1, "a row that holds a block");
+        // Review of round 11: monospace rows holding a quote, an underscore
+        // or a `>` are labels, not code.
+        let (mut d, card) = page();
+        let stack = d.add(Some(card), "div");
+        outlined(&mut d, stack, "8px");
+        d.set_rect(stack, 24.0, 24.0, 500.0, 160.0);
+        for (i, line) in ["Added \"dark mode\"", "Renamed user_id", "Settings > Billing"].iter().enumerate() {
+            let row = d.add(Some(stack), "div");
+            d.set_styles(row, &[("display", "block"), ("fontFamily", "\"Geist Mono\", monospace")]);
+            d.set_rect(row, 48.0, 48.0 + 24.0 * i as f64, 452.0, 16.0);
+            d.add_text(row, line);
+        }
+        assert_eq!(check_layout(&d).len(), 1, "a changelog set in a monospace face");
         // A terminal: a header line and one paragraph of monospace output
         // with inline links in it.
         let (mut d, card) = page();
