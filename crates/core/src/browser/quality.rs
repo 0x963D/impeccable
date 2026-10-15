@@ -2479,24 +2479,25 @@ const CODE_TEXT_SELECTOR: &str = "script, style, template, noscript";
 /// an h5 with an inline `<script>`, so the heading's text content starts
 /// with `document.write(...)`, which no reader sees.
 fn text_without_code(dom: &dyn Dom, el: ElId) -> String {
-    let full = dom.text_content(el);
-    let code = dom.query_all(Some(el), CODE_TEXT_SELECTOR).unwrap_or_default();
-    if code.is_empty() {
-        return full;
+    if dom.query_all(Some(el), CODE_TEXT_SELECTOR).unwrap_or_default().is_empty() {
+        return dom.text_content(el);
     }
-    let mut out = String::with_capacity(full.len());
-    let mut rest = full.as_str();
-    for c in code {
-        let text = dom.text_content(c);
-        if text.is_empty() {
-            continue;
-        }
-        if let Some(pos) = rest.find(&text) {
-            out.push_str(&rest[..pos]);
-            rest = &rest[pos + text.len()..];
+    // Node by node, so a script's text is dropped where the script sits and
+    // the same words shown elsewhere in the heading stay.
+    fn walk(dom: &dyn Dom, el: ElId, out: &mut String) {
+        for child in dom.child_nodes(el) {
+            match child {
+                DomChild::Text(text) => out.push_str(&text),
+                DomChild::Element(c) => {
+                    if !dom.matches(c, CODE_TEXT_SELECTOR).unwrap_or(false) {
+                        walk(dom, c, out);
+                    }
+                }
+            }
         }
     }
-    out.push_str(rest);
+    let mut out = String::new();
+    walk(dom, el, &mut out);
     out
 }
 
@@ -5885,6 +5886,20 @@ mod tests {
         let f = check_page_quality_dom(&d);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].detail, "<h2> \"E-Paper\" followed by <h5> \"28 Rabi-uthani 1448 AH\" (missing h3)");
+
+        // Script source that repeats a shown word removes the script's
+        // copy, not the word.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let h1 = d.add(Some(body), "h1");
+        d.add_text(h1, "Title");
+        let h3 = d.add(Some(body), "h3");
+        d.add_text(h3, "true facts");
+        let script = d.add(Some(h3), "script");
+        d.add_text(script, "true");
+        let f = check_page_quality_dom(&d);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].detail, "<h1> \"Title\" followed by <h3> \"true facts\" (missing h2)");
     }
 
     /// r5-p29: a skip into the footer is chrome; a skip in the content, and

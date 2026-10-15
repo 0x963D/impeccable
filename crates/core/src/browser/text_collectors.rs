@@ -406,8 +406,9 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
 }
 
 /// Whether `el` or an ancestor is `display: none`, or `content-visibility:
-/// hidden` on a box it applies to: the layout renders no box for it at any
-/// scroll position. A value the capture did not record renders.
+/// hidden` on a box it applies to: the layout renders none of `el`'s text at
+/// any scroll position (on `el` itself the box lays out, its words do not).
+/// A value the capture did not record renders.
 fn not_displayed(dom: &dyn Dom, el: ElId) -> bool {
     let mut cur = Some(el);
     while let Some(c) = cur {
@@ -415,8 +416,7 @@ fn not_displayed(dom: &dyn Dom, el: ElId) -> bool {
         if display == "none" {
             return true;
         }
-        if c != el
-            && super::dom::content_visibility_applies(&display)
+        if super::dom::content_visibility_applies(&display)
             && js::to_lower_case(&dom.style(c, "contentVisibility")) == "hidden"
         {
             return true;
@@ -1019,6 +1019,28 @@ mod tests {
         };
         assert_eq!(check_numbered_section_labels_dom(&build(false)).len(), 3);
         assert!(check_numbered_section_labels_dom(&build(true)).is_empty());
+
+        // `content-visibility: hidden` on the label (the block before the
+        // heading) or the heading itself keeps its box and lays out none of
+        // its words.
+        let labels = |d: &FakeDom| -> Vec<ElId> {
+            d.query_all(None, "span").unwrap_or_default().into_iter().filter_map(|s| d.parent(s)).collect()
+        };
+        for on_heading in [false, true] {
+            let mut d = build(false);
+            let els = if on_heading { d.query_all(None, "h3").unwrap_or_default() } else { labels(&d) };
+            assert_eq!(els.len(), 3);
+            for el in els {
+                d.set_styles(el, &[("display", "block"), ("contentVisibility", "hidden")]);
+            }
+            assert!(check_numbered_section_labels_dom(&d).is_empty(), "on heading: {on_heading}");
+        }
+        // On a plain inline box it does nothing.
+        let mut d = build(false);
+        for el in labels(&d) {
+            d.set_styles(el, &[("display", "inline"), ("contentVisibility", "hidden")]);
+        }
+        assert_eq!(check_numbered_section_labels_dom(&d).len(), 3);
 
         // v0-applestylescroll-momo.vercel.app (215483): the same labels in a
         // scroll-driven stage at opacity 0, which a visitor scrolls into

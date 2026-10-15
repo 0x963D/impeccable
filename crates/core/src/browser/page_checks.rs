@@ -3597,7 +3597,7 @@ fn is_scroller_arrow(dom: &dyn Dom, top: ElId, victim: ElId) -> bool {
 /// Whether `el` or a box above it is drawn rotated or skewed: a computed
 /// `transform` whose matrix turns the axes (`matrix(a, b, c, d, ..)` with `b`
 /// or `c` off zero), or a 3D matrix, which this does not read.
-fn drawn_tilted(dom: &dyn Dom, el: ElId) -> bool {
+pub(crate) fn drawn_tilted(dom: &dyn Dom, el: ElId) -> bool {
     let mut cur = Some(el);
     while let Some(c) = cur {
         let t = dom.style(c, "transform");
@@ -3712,6 +3712,11 @@ const CURTAIN_COVER_MIN_ALPHA: f64 = 0.95;
 /// buries nothing): the page laid over a curtain footer. Such a point shows
 /// the page, not the footer's words. `false` when no stack was recorded or
 /// the victim is not in it.
+///
+/// The fill counts only where it paints as itself: clipped to the border
+/// box (or the padding box of a box with no border), with no blend mode,
+/// filter, mask or clip-path on it or a box above it. A white page at
+/// `multiply` leaves every word of the footer under it.
 fn buried_under_the_page(dom: &dyn Dom, stack: &[ElId], victim: ElId, layer: ElId) -> bool {
     let Some(at) = stack.iter().position(|&e| e == victim) else {
         return false;
@@ -3721,9 +3726,40 @@ fn buried_under_the_page(dom: &dyn Dom, stack: &[ElId], victim: ElId, layer: ElI
             && !dom.contains(layer, box_)
             && parse_any_color(Some(&dom.style(box_, "backgroundColor")))
                 .is_some_and(|c| c.alpha_or_one() >= CURTAIN_COVER_MIN_ALPHA)
+            && fill_paints_its_border_box(dom, box_)
+            && composited_plainly(dom, box_)
             && painted_at_capture(dom, box_)
             && effective_opacity_dom(dom, box_) >= CURTAIN_COVER_MIN_ALPHA
     })
+}
+
+/// Whether `el`'s background reaches the edge of its box: clipped to the
+/// border box, or to the padding box of a box whose borders are all 0.
+fn fill_paints_its_border_box(dom: &dyn Dom, el: ElId) -> bool {
+    ["backgroundClip", "webkitBackgroundClip"].iter().all(|prop| match dom.style(el, prop).as_str() {
+        "" | "border-box" => true,
+        "padding-box" => ["Top", "Right", "Bottom", "Left"]
+            .iter()
+            .all(|s| parse_float(&dom.style(el, &format!("border{s}Width"))) == 0.0),
+        _ => false,
+    })
+}
+
+/// Whether `el` and every box above it composite as plain paint: no
+/// `mix-blend-mode` other than `normal`, no `filter`, no mask and no
+/// clip-path.
+fn composited_plainly(dom: &dyn Dom, el: ElId) -> bool {
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if !matches!(dom.style(c, "mixBlendMode").as_str(), "normal" | "")
+            || !matches!(dom.style(c, "filter").as_str(), "none" | "")
+            || super::text_layers::masked_or_clipped(dom, c)
+        {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    true
 }
 
 /// The points of `el`'s occlusion grid ([`occlusion_probe_points`]) that
@@ -4049,10 +4085,12 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         // it names overlaps the victim whichever of the two is on top.
         let passes_through = ignores_pointer_events(dom, el);
         // A curtain layer the page covers wherever a probe asks: no point
-        // over any of its text answers with the layer or anything in it.
-        // There the victim's words are buried under the page, not crossed
-        // by the text on it. One point the layer answers (a footer the page
-        // has scrolled off), or one point not answered, keeps every
+        // over any of its text answers with the layer or anything in it,
+        // and at every one the page lays an opaque fill over the text
+        // ([`buried_under_the_page`]). There the victim's words are buried
+        // under the page, not crossed by the text on it. One point the
+        // layer answers (a footer the page has scrolled off), one point not
+        // answered, or one where only a transparent box answers keeps every
         // finding in it.
         let curtain = curtain_layer(dom, el).filter(|&layer| {
             *curtains.entry(layer).or_insert_with(|| {
@@ -4062,7 +4100,10 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                     for (x, y) in occlusion_points_on_lines(dom, t.el, &t.rect, vw, vh) {
                         asked += 1;
                         match dom.element_from_point(x, y) {
-                            Some(a) if a != layer && !dom.contains(layer, a) => {}
+                            Some(a)
+                                if a != layer
+                                    && !dom.contains(layer, a)
+                                    && buried_under_the_page(dom, &dom.elements_from_point(x, y), t.el, layer) => {}
                             _ => return false,
                         }
                     }
@@ -6098,7 +6139,13 @@ mod tests {
     /// page uncovers as it scrolls away, not text a reader sees collide.
     #[test]
     fn text_occlusion_skips_a_curtain_footer_the_page_covers() {
-        let run_full = |z: &str, page_fill: &str, footer_shows: bool, top: &str, bottom: &str, page_opacity: &str| {
+        let run_with = |z: &str,
+                        page_fill: &str,
+                        footer_shows: bool,
+                        top: &str,
+                        bottom: &str,
+                        page_opacity: &str,
+                        page_extra: &[(&str, &str)]| {
             let mut d = FakeDom::new();
             let (_h, body) = d.with_page();
             d.inner_width = 390.0;
@@ -6119,6 +6166,7 @@ mod tests {
             let main = d.add(Some(body), "main");
             d.set_styles(main, PROBE_BASE);
             d.set_styles(main, &[("position", "relative"), ("zIndex", "1"), ("backgroundColor", page_fill), ("opacity", page_opacity)]);
+            d.set_styles(main, page_extra);
             // The page covers the whole footer, or stops short of its last
             // row, which then shows.
             d.set_rect(main, 0.0, 0.0, 390.0, if footer_shows { 780.0 } else { 13087.0 });
@@ -6149,6 +6197,9 @@ mod tests {
                 .filter(|s| s.contains("\"Privacy\"") || s.contains("\"Terms\"") || s.contains("\"Latent\""))
                 .collect::<Vec<_>>()
         };
+        let run_full = |z: &str, page_fill: &str, footer_shows: bool, top: &str, bottom: &str, page_opacity: &str| {
+            run_with(z, page_fill, footer_shows, top, bottom, page_opacity, &[])
+        };
         let run_anchored = |z: &str, page_fill: &str, footer_shows: bool, top: &str, bottom: &str| {
             run_full(z, page_fill, footer_shows, top, bottom, "1")
         };
@@ -6171,9 +6222,24 @@ mod tests {
         assert!(!run_full("0", "rgb(10, 11, 16)", false, "auto", "0px", "0.5").is_empty());
         // Above the page, or under a page with no opaque fill, it collides.
         assert_eq!(run("2", "rgb(10, 11, 16)", false).len(), 3);
+        // Under a faint page the footer's words show, so its wordmark
+        // overhangs the card too.
         let faint = run("0", "rgba(10, 11, 16, 0.5)", false);
-        assert_eq!(faint.len(), 1, "{faint:?}");
+        assert_eq!(faint.len(), 2, "{faint:?}");
         assert!(faint[0].contains("\"Privacy\""), "{faint:?}");
+        assert!(faint[1].contains("\"Latent\""), "{faint:?}");
+        // So do they under an opaque page that blends, filters or masks its
+        // fill: a page at `multiply` leaves the footer showing.
+        for extra in [
+            ("mixBlendMode", "multiply"),
+            ("filter", "opacity(0.5)"),
+            ("maskImage", "linear-gradient(black, transparent)"),
+            ("backgroundClip", "content-box"),
+        ] {
+            let seen = run_with("0", "rgb(10, 11, 16)", false, "auto", "0px", "1", &[extra]);
+            assert!(seen.iter().any(|s| s.contains("\"Privacy\"")), "{extra:?}: {seen:?}");
+            assert!(seen.iter().any(|s| s.contains("\"Latent\"")), "{extra:?}: {seen:?}");
+        }
         // Where one of its links shows, the footer is on screen, and what
         // the page lies on is covered: the link under its heading, the
         // wordmark under its fill.

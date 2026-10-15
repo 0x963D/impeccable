@@ -601,7 +601,7 @@ pub(crate) fn visible_through_clips(dom: &dyn Dom, el: ElId, top: ElId) -> crate
     r
 }
 
-/// The fill alpha, and the opacity of every box from the fill up to the
+/// The fill alpha, times the opacity of every box from the fill up to the
 /// sibling that holds it, a box needs to hide the text under it.
 const FILL_COVER_MIN_ALPHA: f64 = 0.95;
 
@@ -626,14 +626,16 @@ const FILL_COVER_BUDGET: usize = 3000;
 ///   none of them sets a `z-index`, so the fill paints in a positioned layer
 ///   after the text's (a static block's background paints under the text of
 ///   earlier blocks);
-/// - the fill's `background-color` has an alpha of [`FILL_COVER_MIN_ALPHA`]
-///   or more, its background is clipped to the border or padding box, and
-///   it is painted at capture;
-/// - every box from the fill up to the sibling has an opacity of at least
-///   [`FILL_COVER_MIN_ALPHA`], no mask or clip-path, no `filter`, and
-///   `mix-blend-mode: normal`;
-/// - the fill's box, cut to every overflow clip up to the sibling and inset
-///   by 0.3 of its largest corner radius, covers the text within a pixel.
+/// - the fill's `background-color` alpha, times the opacity of every box
+///   from the fill up to the sibling, is [`FILL_COVER_MIN_ALPHA`] or more,
+///   its background is clipped to the border or padding box, and it is
+///   painted at capture;
+/// - every box from the fill up to the sibling has no mask or clip-path, no
+///   `filter`, and `mix-blend-mode: normal`, and neither the fill nor any
+///   ancestor is rotated or skewed;
+/// - the fill's box (its padding box when the background is clipped to
+///   it), cut to every overflow clip up to the sibling and inset by 0.3 of
+///   its largest corner radius, covers the text within a pixel.
 ///
 /// A box the capture did not measure, or a search past
 /// [`FILL_COVER_BUDGET`] elements, covers nothing.
@@ -711,7 +713,15 @@ fn fill_covers(
     {
         return false;
     }
+    // A rotated or skewed fill paints less than its bounding box: the text
+    // can show in the corners the box adds.
+    if super::page_checks::drawn_tilted(dom, fill) {
+        return false;
+    }
     let mut layered = false;
+    // The fill's alpha times every opacity up to the sibling: ten boxes at
+    // 0.96 each let 0.34 of the text through between them.
+    let mut alpha = bg.alpha_or_one();
     let mut cur = Some(fill);
     while let Some(c) = cur {
         // A blend mode or a filter changes what the fill leaves of the text
@@ -726,6 +736,10 @@ fn fill_covers(
         {
             return false;
         }
+        alpha *= js::parse_float(&dom.style(c, "opacity"));
+        if !(alpha >= FILL_COVER_MIN_ALPHA) {
+            return false;
+        }
         layered |= positioned(c);
         if c == sib {
             break;
@@ -735,7 +749,21 @@ fn fill_covers(
     if !layered {
         return false;
     }
-    let r = visible_through_clips(dom, fill, sib);
+    let mut r = visible_through_clips(dom, fill, sib);
+    // A fill clipped to the padding box leaves the border unpainted, and a
+    // transparent border shows the text under it.
+    if clip == "padding-box" || webkit_clip == "padding-box" {
+        let own = dom.rect(fill);
+        let border = |side: &str| js::parse_float(&dom.style(fill, &format!("border{side}Width")));
+        let (t, rt, b, l) = (border("Top"), border("Right"), border("Bottom"), border("Left"));
+        if ![t, rt, b, l].iter().all(|w| w.is_finite() && *w >= 0.0) {
+            return false;
+        }
+        r.left = r.left.max(own.left + l);
+        r.top = r.top.max(own.top + t);
+        r.right = r.right.min(own.right - rt);
+        r.bottom = r.bottom.min(own.bottom - b);
+    }
     if !r.all_finite() {
         return false;
     }

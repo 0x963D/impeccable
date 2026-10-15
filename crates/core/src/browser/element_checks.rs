@@ -9496,6 +9496,32 @@ mod tests {
         // text: a white card at `multiply` leaves all of it.
         assert!(run(&|d, _, cover, _| { d.set_style(cover, "mixBlendMode", "multiply"); }));
         assert!(run(&|d, button, _, _| { d.set_style(button, "filter", "opacity(0.5)"); }));
+        // Opacities that each pass add up: 0.96 twice lets 0.08 through.
+        assert!(!run(&|d, button, _, _| { d.set_style(button, "opacity", "0.96"); }));
+        assert!(run(&|d, button, cover, _| {
+            d.set_style(button, "opacity", "0.96");
+            d.set_style(cover, "opacity", "0.96");
+        }));
+        // A fill clipped to its padding box under a thick transparent border
+        // leaves the text in the border showing; a thin border does not.
+        let bordered = |width: &'static str| {
+            move |d: &mut FakeDom, _: ElId, cover: ElId, _: ElId| {
+                d.set_style(cover, "backgroundClip", "padding-box");
+                for side in ["Top", "Right", "Bottom", "Left"] {
+                    d.set_style(cover, &format!("border{side}Width"), width);
+                }
+            }
+        };
+        assert!(!run(&bordered("0px")));
+        assert!(run(&bordered("40px")));
+        assert!(run(&|d, _, cover, _| { d.set_style(cover, "backgroundClip", "padding-box"); }));
+        // A rotated card, or one in a skewed button, paints less than the
+        // bounds the capture measured.
+        assert!(run(&|d, _, cover, _| {
+            d.set_style(cover, "transform", "matrix(0.707107, 0.707107, -0.707107, 0.707107, 0, 0)");
+        }));
+        assert!(run(&|d, button, _, _| { d.set_style(button, "transform", "matrix(1, 0, 0.3, 1, 0, 0)"); }));
+        assert!(!run(&|d, _, cover, _| { d.set_style(cover, "transform", "matrix(1, 0, 0, 1, 0, 4)"); }));
     }
 
     /// A transparent grain overlay laid over a section below the fold: the
