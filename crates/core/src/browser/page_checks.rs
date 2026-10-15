@@ -4251,6 +4251,11 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if seen_victims.contains(&el) {
             continue;
         }
+        // Nor does text in a curtain layer the page covers wherever a probe
+        // asked: none of it is on screen to overhang a card.
+        if curtain_layer(dom, el).is_some_and(|layer| curtains.get(&layer) == Some(&true)) {
+            continue;
+        }
         let font_size = {
             let n = parse_float(&dom.style(el, "fontSize"));
             if num_truthy(n) {
@@ -6112,30 +6117,45 @@ mod tests {
             d.set_styles(lede, PROBE_BASE);
             d.set_rect(lede, 16.0, 600.0, 358.0, 40.0);
             d.add_text(lede, "Every regression, before your users");
+            // The footer's 48px wordmark lies across the edge of a bordered
+            // pricing card on the page: buried with the rest of the footer,
+            // it overhangs nothing a reader sees.
+            let card = d.add(Some(main), "article");
+            d.set_styles(card, PROBE_BASE);
+            d.set_styles(card, &[("backgroundColor", "rgb(255, 255, 255)"), ("borderTopWidth", "1px")]);
+            d.set_rect(card, 200.0, 300.0, 170.0, 120.0);
+            let mark = d.add(Some(footer), "span");
+            d.set_styles(mark, PROBE_BASE);
+            d.set_styles(mark, &[("fontSize", "48px"), ("lineHeight", "56px")]);
+            d.set_rect(mark, 16.0, 330.0, 240.0, 56.0);
+            d.add_text(mark, "Latent");
             mark_body_descendants(&mut d);
             check_text_occlusion_dom(&d)
                 .into_iter()
                 .map(|f| f.finding.detail)
-                .filter(|s| s.contains("\"Privacy\"") || s.contains("\"Terms\""))
+                .filter(|s| s.contains("\"Privacy\"") || s.contains("\"Terms\"") || s.contains("\"Latent\""))
                 .collect::<Vec<_>>()
         };
-        // Both links: one under the page's heading, one under its fill.
+        // Both links: one under the page's heading, one under its fill;
+        // and the wordmark, under the card.
         let base = run("auto", "rgb(10, 11, 16)", false);
-        assert_eq!(base.len(), 2, "{base:?}");
+        assert_eq!(base.len(), 3, "{base:?}");
         assert!(base[0].contains("on an opaque layer (main)"), "{base:?}");
         // Sticky at z-index 0, or below it: buried under the page.
         assert!(run("0", "rgb(10, 11, 16)", false).is_empty());
         assert!(run("-1", "rgb(10, 11, 16)", false).is_empty());
         // Above the page, or under a page with no opaque fill, it collides.
-        assert_eq!(run("2", "rgb(10, 11, 16)", false).len(), 2);
+        assert_eq!(run("2", "rgb(10, 11, 16)", false).len(), 3);
         let faint = run("0", "rgba(10, 11, 16, 0.5)", false);
         assert_eq!(faint.len(), 1, "{faint:?}");
         assert!(faint[0].contains("\"Privacy\""), "{faint:?}");
-        // Where one of its links shows, the footer is on screen, and the
-        // link the page's text lies on is covered.
+        // Where one of its links shows, the footer is on screen, and what
+        // the page lies on is covered: the link under its heading, the
+        // wordmark under its fill.
         let shows = run("0", "rgb(10, 11, 16)", true);
-        assert_eq!(shows.len(), 1, "{shows:?}");
+        assert_eq!(shows.len(), 2, "{shows:?}");
         assert!(shows[0].contains("\"Privacy\""), "{shows:?}");
+        assert!(shows[1].contains("\"Latent\" is 100% covered by an opaque element (main)"), "{shows:?}");
     }
 
     /// boardlab.dev (10047349): the canvas hint panel is `pointer-events:
