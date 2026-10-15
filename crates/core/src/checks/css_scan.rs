@@ -3174,6 +3174,9 @@ mod tests {
             (".card { c: d; .s { c: d } }", 21, None),
             (".card { @media (x) { & .s { c: d } } }", 31, None),
             ("@media (x) { .a{b} .c { d } }", 25, Some(".c")),
+            // A quoted or escaped brace opens no block.
+            (".q::before { content: \"{\"; } .gone { c: d }", 40, Some(".gone")),
+            (".q::before { content: '\\{'; } .gone { c: d }", 40, Some(".gone")),
         ];
         for (text, idx, want) in cases {
             assert_eq!(
@@ -3335,6 +3338,8 @@ mod tests {
         // both steps reads the px beside it.
         assert!(!pulses("@keyframes c { 0%,100% { opacity: .4; transform: translate(-50%, 0) } 50% { opacity: 1; transform: translate(-50%, -14px) } }"));
         assert!(!pulses("@keyframes c2 { 0%,100% { opacity: .4; transform: translate(-50%, -50%) } 50% { opacity: 1; transform: translate(-50%, -50%) translateY(-12px) } }"));
+        // A nested call cuts the arguments short: they decide nothing.
+        assert!(pulses("@keyframes c4 { 0%,100% { opacity: .4; transform: translate(calc(0px), 8px) } 50% { opacity: 1; transform: translate(0px, 8px) } }"));
         assert!(pulses("@keyframes c3 { 0%,100% { opacity: .4; transform: translate(calc(-50% + 2px), 0) } 50% { opacity: 1; transform: translateX(-50%) } }"));
         // One height, or one step that translates, decides nothing.
         assert!(pulses("@keyframes h { 0%, 100% { opacity: .4; height: 8px } 50% { opacity: 1 } }"));

@@ -166,14 +166,29 @@ pub fn enclosing_css_selector(css_text: &str, index: usize) -> Option<String> {
 fn enclosed_only_by_at_rules(css: &str) -> bool {
     let bytes = css.as_bytes();
     let mut open: Vec<usize> = Vec::new();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'{' => open.push(i),
-            b'}' => {
-                open.pop();
-            }
-            _ => {}
+    // A brace in a quoted string (`content: "{"`) or escaped (`\{`) opens
+    // and closes nothing.
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 2;
+            continue;
         }
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'{' => open.push(i),
+                b'}' => {
+                    open.pop();
+                }
+                _ => {}
+            },
+        }
+        i += 1;
     }
     open.iter().all(|&brace| {
         let head_start = css[..brace].rfind(['{', '}', ';']).map(|p| p + 1).unwrap_or(0);
@@ -420,7 +435,22 @@ fn step_translation(decls: &DeclMap) -> Option<[TranslateAxis; 3]> {
             let f = m.as_str();
             let Some(open) = f.find('(') else { continue };
             let name = &f[..open];
-            let args: Vec<&str> = f[open + 1..f.len() - 1].split(',').map(js::trim).collect();
+            let inner = &f[open + 1..f.len() - 1];
+            // A nested call (`translate(calc(0px), 8px)`) ends the match at
+            // its own `)`, cutting the arguments short: none of them reads.
+            if inner.contains('(') {
+                let axes: &[usize] = match name {
+                    "translatex" => &[0],
+                    "translatey" => &[1],
+                    "translatez" => &[2],
+                    _ => &[0, 1, 2],
+                };
+                for &i in axes {
+                    out[i] = None;
+                }
+                continue;
+            }
+            let args: Vec<&str> = inner.split(',').map(js::trim).collect();
             let part = |i: usize| args.get(i).map_or(Some((0.0, 0.0)), |a| translate_component(a));
             match name {
                 "translatex" => add_axis(&mut out[0], part(0)),
