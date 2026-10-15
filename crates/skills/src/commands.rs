@@ -654,6 +654,12 @@ fn install(flags: &[String], io: &mut Io) -> R<()> {
             if !written_hook_targets.is_empty() {
                 out(io, &format!("Installed hooks into: {}", written_hook_targets.join(", ")));
             }
+            // A repeat user-scope install whose user hook already exists never
+            // sends Claude through copy_provider_hooks, so the duplicate-hook
+            // cleanup that function ends with runs here as well.
+            if want_hooks && scope == Scope::User && hook_targets.contains(&".claude") {
+                hook_manifest::prune_duplicate_claude_hooks(&sys, &install_root, &hook_root)?;
+            }
 
             // Self-heal any pre-launcher (`node .../hook.mjs`) manifest left by a
             // v3 install into a present provider dir (triage E8). Independent of

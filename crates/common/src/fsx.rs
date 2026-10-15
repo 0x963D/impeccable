@@ -10,10 +10,7 @@ use std::path::{Path, PathBuf};
 /// permissions carry over to the replacement.
 pub fn write_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> std::io::Result<()> {
     let path = path.as_ref();
-    let target: PathBuf = match std::fs::canonicalize(path) {
-        Ok(real) => real,
-        Err(_) => path.to_path_buf(),
-    };
+    let target = resolve_write_target(path);
     let dir = match target.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
@@ -38,6 +35,38 @@ pub fn write_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> std::io::Result<()>
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+
+/// The file a write to `path` should land in. An existing target resolves
+/// through `canonicalize`. A symlink whose destination does not exist yet
+/// (a dotfiles link to a file not created) cannot be canonicalized, so its
+/// chain is followed with `read_link`, each relative hop resolved against the
+/// link's own directory, up to a bound that stops a cycle. Anything else is
+/// written in place.
+fn resolve_write_target(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    const MAX_HOPS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_HOPS {
+        let is_link = std::fs::symlink_metadata(&current)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_link {
+            return current;
+        }
+        let Ok(next) = std::fs::read_link(&current) else {
+            return current;
+        };
+        current = if next.is_absolute() {
+            next
+        } else {
+            current.parent().map(|p| p.join(&next)).unwrap_or(next)
+        };
+    }
+    // A cycle or an absurd chain: leave the link alone rather than guess.
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -80,6 +109,39 @@ mod tests {
         write_atomic(&link, b"new").unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_the_destination_of_a_dangling_link_chain() {
+        let d = tmp("dangling");
+        std::fs::create_dir_all(d.join("dotfiles")).unwrap();
+        let link = d.join("link.json");
+        let hop = d.join("dotfiles/hop.json");
+        // Relative hops: `link.json -> dotfiles/hop.json -> real.json`, the
+        // second resolved against `dotfiles/`, and `real.json` not created yet.
+        std::os::unix::fs::symlink("dotfiles/hop.json", &link).unwrap();
+        std::os::unix::fs::symlink("real.json", &hop).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&hop).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(d.join("dotfiles/real.json")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaves_a_symlink_cycle_alone() {
+        let d = tmp("cycle");
+        let a = d.join("a.json");
+        let b = d.join("b.json");
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        // Replaces the link itself rather than looping forever.
+        write_atomic(&a, b"x").unwrap();
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "x");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

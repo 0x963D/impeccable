@@ -777,13 +777,18 @@ fn repair_hook_manifests(rt: &Runtime, cwd: &str) -> Result<Repaired, String> {
             continue;
         };
         let mut user_settings = target.user_settings;
+        // The project manifest to prune once the user-scope hook is confirmed.
+        let mut prune_after: Option<String> = None;
         if user_scoped {
             // A user-scope skill gets its hook where a user-scope install
             // writes it: `~/.claude/settings.json`, with the absolute launcher.
             // In the project only the gitignored `settings.local.json` loses
-            // its Impeccable entries; the committed `settings.json` belongs to
-            // the team and is never rewritten with a home path.
-            prune_impeccable_hook_from_manifest(&dest)?;
+            // its Impeccable entries, and only after the user hook is written
+            // or already present: an unreadable user file is skipped, and the
+            // project hook is then the only one the machine has. The committed
+            // `settings.json` belongs to the team and is never rewritten with
+            // a home path.
+            prune_after = Some(dest.clone());
             dest = jsp::join(&[&rt.homedir(), ".claude", "settings.json"]);
             user_settings = true;
         } else if let Some(sd) = &shared_dest {
@@ -825,6 +830,9 @@ fn repair_hook_manifests(rt: &Runtime, cwd: &str) -> Result<Repaired, String> {
             None
         };
         if current.as_deref() == Some(serialized.as_str()) {
+            if let Some(project_manifest) = &prune_after {
+                prune_impeccable_hook_from_manifest(project_manifest)?;
+            }
             result.already.push(target.provider.to_string());
             continue;
         }
@@ -834,6 +842,9 @@ fn repair_hook_manifests(rt: &Runtime, cwd: &str) -> Result<Repaired, String> {
             impeccable_common::fsx::write_atomic(&dest, serialized.as_bytes()).map_err(|e| e.to_string())?;
         } else {
             std::fs::write(&dest, serialized).map_err(|e| e.to_string())?;
+        }
+        if let Some(project_manifest) = &prune_after {
+            prune_impeccable_hook_from_manifest(project_manifest)?;
         }
         result.written.push(target.provider.to_string());
     }

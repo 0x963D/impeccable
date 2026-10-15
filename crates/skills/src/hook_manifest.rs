@@ -533,17 +533,27 @@ pub fn copy_provider_hooks(sys: &crate::providers::Sys, bundle_dir: &str, root: 
                 written.push(provider);
             }
         }
-        let user_manifest = jsp::join(&[skill_root, ".claude", "settings.json"]);
-        if user_scope && *provider == ".claude" && file_has_impeccable_hook_marker(&user_manifest) {
-            prune_impeccable_hook_from_manifest(&jsp::join(&[skill_root, ".claude", "settings.local.json"]))?;
-            let project_root = project_root.unwrap_or(root);
-            let project_local = jsp::join(&[project_root, ".claude", "settings.local.json"]);
-            if !sys.is_home_dir(project_root) {
-                prune_impeccable_hook_from_manifest(&project_local)?;
-            }
+        if user_scope && *provider == ".claude" {
+            prune_duplicate_claude_hooks(sys, skill_root, project_root.unwrap_or(root))?;
         }
     }
     Ok(written)
+}
+
+/// Once a user-scope Claude hook is in `<home>/.claude/settings.json`, the
+/// Impeccable entries in `settings.local.json` (the home one Claude never
+/// loads, and the project's gitignored one) only make the hook fire twice.
+/// Prunes them, and only when the user hook is confirmed present. Runs after
+/// a fresh hook write and on a repeat install whose user hook already exists.
+pub fn prune_duplicate_claude_hooks(sys: &crate::providers::Sys, home_root: &str, project_root: &str) -> Result<(), String> {
+    if !file_has_impeccable_hook_marker(&jsp::join(&[home_root, ".claude", "settings.json"])) {
+        return Ok(());
+    }
+    prune_impeccable_hook_from_manifest(&jsp::join(&[home_root, ".claude", "settings.local.json"]))?;
+    if !sys.is_home_dir(project_root) {
+        prune_impeccable_hook_from_manifest(&jsp::join(&[project_root, ".claude", "settings.local.json"]))?;
+    }
+    Ok(())
 }
 
 /// Self-heal for the v3 -> launcher upgrade (triage E8): a present provider

@@ -771,7 +771,40 @@ fn existing_user_install_ignores_project_hook_when_user_hook_is_missing() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-// ─── Windows hook migration dedupe (665c51b9, #604) ──────────────────────────
+#[test]
+fn repeat_user_install_prunes_duplicate_project_hook_when_user_hook_exists() {
+    let root = temp_root("claude-user-hook-repeat");
+    let project = format!("{root}/project");
+    let home = format!("{root}/home");
+    let tmpdir = format!("{root}/tmp");
+    for dir in [&project, &home, &tmpdir] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::create_dir_all(format!("{project}/.git")).unwrap();
+    let bundle = create_fake_universal_bundle(&project, &[".claude"]);
+    let env = base_env(&home, &tmpdir, &bundle);
+    let args = ["install", "-y", "--user", "--providers=claude"];
+
+    let first = run_cli(&args, &project, &env);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    assert!(manifest_names_launcher(&format!("{home}/.claude/settings.json"), &home, ".claude"));
+    let project_local = format!("{project}/.claude/settings.local.json");
+    write(
+        &project_local,
+        r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\" hook"}]}]}}"#,
+    );
+
+    let second = run_cli(&args, &project, &env);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(manifest_names_launcher(&format!("{home}/.claude/settings.json"), &home, ".claude"));
+    let local = read(&project_local);
+    assert!(!local.contains("impeccable"), "duplicate project hook survived a repeat install: {local}");
+    let local_json: Value = serde_json::from_str(&local).unwrap();
+    assert_eq!(local_json["permissions"]["allow"][0], "Bash(ls)");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+// ─── Windows hook migration dedupe (665c51b9, #604)──────────────────────────
 
 #[test]
 fn merge_hook_manifests_replaces_legacy_windows_path_claude_hooks() {

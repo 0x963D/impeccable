@@ -2421,6 +2421,30 @@ fn admin_on_user_scope_repair_leaves_committed_settings_byte_unchanged() {
     assert!(std::fs::read_to_string(home.join(".claude/settings.json")).unwrap().contains("impeccable"));
 }
 
+/// Regression: an unreadable `~/.claude/settings.json` is skipped, so the
+/// project hook must survive; pruning it first would leave no hook at all.
+#[test]
+fn admin_on_user_scope_keeps_project_hook_when_user_settings_are_invalid() {
+    let t = Tmp::new();
+    let cwd = t.path();
+    let home = t.0.join("home");
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    let broken = "{ \"model\": \"claude-sonnet-5\",, }";
+    std::fs::write(home.join(".claude/settings.json"), broken).unwrap();
+    let local_original = r#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\" hook"}]}]}}"#;
+    t.write(".claude/settings.local.json", local_original);
+    let home_text = home.to_string_lossy().to_string();
+    let r = rt_with(&cwd, env(&[("HOME", &home_text), ("USERPROFILE", &home_text)]));
+
+    let (out, _, code) = admin_run(&r, &["on"]);
+
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Skipped "), "{out}");
+    assert!(out.contains("not valid JSON"), "{out}");
+    assert_eq!(std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(), broken);
+    assert_eq!(t.read(".claude/settings.local.json"), local_original);
+}
+
 #[test]
 fn admin_on_does_not_repair_project_manifests_from_other_user_scope_skills() {
     let t = Tmp::new();
