@@ -128,7 +128,9 @@ pub struct DecorativeTextFacts {
     /// The element's computed font size in px, 0 where it was not read.
     pub font_size_px: f64,
     /// The largest computed font size of an `h1` on the page in px, 0 where
-    /// there is none.
+    /// there is none. Read only where the type is between
+    /// [`WORDMARK_H1_PATH_MIN_PX`] and [`WORDMARK_MIN_PX`], the sizes the
+    /// `h1` decides; 0 otherwise.
     pub largest_h1_px: f64,
     /// How much of its ink the text shows: its effective opacity times its
     /// colour's alpha. Read only where the type is display size; 1 otherwise.

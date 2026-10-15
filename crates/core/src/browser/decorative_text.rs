@@ -3,7 +3,8 @@
 
 use crate::checks::decorative_text::{
     avatar_sized, centred_in, classify_decorative_text, is_mockup_marker, is_signature_marker,
-    is_wordmark_size, DecorativeShape, DecorativeTextFacts, MOCKUP_MARKER_SKIP_TAGS, WORDMARK_MAX_OPACITY,
+    is_wordmark_size, DecorativeShape, DecorativeTextFacts, MOCKUP_MARKER_SKIP_TAGS, WORDMARK_H1_PATH_MIN_PX, WORDMARK_MAX_OPACITY,
+    WORDMARK_MIN_PX,
 };
 use super::dom::{class_attr, closest_or_none, pf0, tag_lower, Dom, ElId};
 use crate::color::{parse_any_color, parse_rgb, Rgba};
@@ -206,12 +207,18 @@ pub fn decorative_text_facts_dom(dom: &dyn Dom, el: ElId) -> DecorativeTextFacts
         .is_some_and(|c| collapsed_text(dom, c) == text);
     let (picture_ancestor, mockup_ancestor) = marked_mockup(dom, el);
     let font_size_px = pf0(&dom.style(el, "fontSize"));
-    let largest_h1_px = dom
-        .query_all(None, "h1")
-        .unwrap_or_default()
-        .into_iter()
-        .map(|h| pf0(&dom.style(h, "fontSize")))
-        .fold(0.0, f64::max);
+    // The page's `h1` sizes decide only type between the h1 path's floor and
+    // the plain display floor; the walk over the page is skipped for the
+    // rest, which is nearly every text the checks ask about.
+    let largest_h1_px = if (WORDMARK_H1_PATH_MIN_PX..WORDMARK_MIN_PX).contains(&font_size_px) {
+        dom.query_all(None, "h1")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| pf0(&dom.style(h, "fontSize")))
+            .fold(0.0, f64::max)
+    } else {
+        0.0
+    };
     let display = is_wordmark_size(font_size_px, largest_h1_px);
     let shown_opacity = if display { shown_opacity(dom, el) } else { 1.0 };
     let site_names = if display && shown_opacity <= WORDMARK_MAX_OPACITY {
@@ -270,6 +277,23 @@ mod tests {
         d2.set_styles(tile, &[("backgroundColor", "rgb(19, 130, 232)")]);
         d2.set_rect(tile, 0.0, 0.0, 40.0, 40.0);
         assert_eq!(decorative_text_shape_dom(&d2, tile), None);
+    }
+
+    /// The page's `h1` sizes are read only for type the h1 path can decide:
+    /// body text and plain display type skip the walk over the page.
+    #[test]
+    fn the_h1_walk_runs_only_where_it_decides() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let h1 = d.add(Some(body), "h1");
+        d.add_text(h1, "Title");
+        d.set_style(h1, "fontSize", "30px");
+        let p = d.add(Some(body), "p");
+        d.add_text(p, "Body copy");
+        for (size, h1_read) in [("14px", 0.0), ("96px", 30.0), ("160px", 0.0)] {
+            d.set_style(p, "fontSize", size);
+            assert_eq!(decorative_text_facts_dom(&d, p).largest_h1_px, h1_read, "{size}");
+        }
     }
 
     /// incredible.one (10048155): `span.br-footer-monogram`, "Incredible" at

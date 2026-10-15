@@ -185,7 +185,11 @@ fn collapse_ws(s: &str) -> String {
 /// around it (or that it is): the control's text is `el`'s text, and nothing
 /// else in the control paints, neither a picture, an icon or an SVG, nor a box
 /// with a fill, a background image or a border (a hamburger's bars). Boxes
-/// that hold `el`, and boxes inside it, do not count.
+/// that hold `el` do not count. Inside `el` (a link that owns its text
+/// beside an icon) a picture or an SVG counts, even one with a `<title>`,
+/// and so does any other box that paints and holds no text (a hamburger's
+/// bars, an icon-font `<i>`); a box of the label's own words (`<i>more</i>`)
+/// does not.
 fn sole_visible_label_of_control(dom: &dyn Dom, el: ElId) -> bool {
     let Some(control) = closest_or_none(dom, el, "a, button, [role=\"button\"]") else {
         return false;
@@ -195,8 +199,10 @@ fn sole_visible_label_of_control(dom: &dyn Dom, el: ElId) -> bool {
     if own.is_empty() || text(control) != own {
         return false;
     }
+    let is_picture =
+        |n: ElId| matches!(tag_lower(dom, n).as_str(), "svg" | "img" | "picture" | "canvas" | "video" | "object" | "embed");
     let paints = |n: ElId| {
-        if matches!(tag_lower(dom, n).as_str(), "svg" | "img" | "picture" | "canvas" | "video" | "i" | "object" | "embed") {
+        if is_picture(n) || tag_lower(dom, n) == "i" {
             return true;
         }
         let r = dom.rect(n);
@@ -215,8 +221,8 @@ fn sole_visible_label_of_control(dom: &dyn Dom, el: ElId) -> bool {
     dom.query_all(Some(control), "*")
         .unwrap_or_default()
         .into_iter()
-        .filter(|&n| n != el && !dom.contains(n, el) && !dom.contains(el, n))
-        .all(|n| !paints(n))
+        .filter(|&n| n != el && !dom.contains(n, el))
+        .all(|n| !(paints(n) && (!dom.contains(el, n) || is_picture(n) || text(n).is_empty())))
 }
 
 /// JS `Math.round(x)` rendered as `${...}`.
@@ -1639,11 +1645,15 @@ pub(crate) fn is_identity_matrix(t: &str) -> bool {
 /// fade, and `effective_bg` is replaced by what the fold says the surface
 /// looks like. A box caught mid-reveal (`opacity_at_rest`) fades nothing.
 /// The opacity [`fold_surface_opacity`] reads for one box: the end keyframe
-/// for a box a scroll or view timeline holds (`scroll_held_end_opacity`),
-/// 1 for a box caught mid-reveal (`opacity_at_rest`), else what was captured.
+/// for a box a scroll or view timeline holds (`scroll_held_end_opacity`) or
+/// a timed entrance caught at 0 holds (`entrance_end_opacity`), the same
+/// settled value the visibility gates count; 1 for a box caught mid-reveal
+/// (`opacity_at_rest`), else what was captured.
 fn fold_opacity_of(dom: &dyn Dom, c: ElId) -> f64 {
     let opacity = opacity_of(dom, c);
-    if let Some(end) = crate::browser::painted::scroll_held_end_opacity(dom, c) {
+    if let Some(end) = crate::browser::painted::scroll_held_end_opacity(dom, c)
+        .or_else(|| crate::browser::painted::entrance_end_opacity(dom, c))
+    {
         end
     } else if opacity < 0.999 && !opacity_at_rest(dom, c, opacity) {
         1.0
@@ -5811,6 +5821,67 @@ mod tests {
         let (mut d, wrap, span) = muted_text_in_wrapper("span", "Opens in a new tab", "rgb(254, 254, 254)");
         d.set_style(wrap, "backgroundColor", "rgb(254, 254, 254)");
         assert!(colors(&d, span).is_empty(), "{:?}", colors(&d, span));
+        // A link that owns its text beside an icon inside it, on a white
+        // header: the icon is what the link shows, and the white text is
+        // hidden on purpose. A box of its own words (`<i>`) is still label.
+        let (mut d, wrap, link) = muted_text_in_wrapper("a", "Menu", "rgb(255, 255, 255)");
+        d.set_style(wrap, "backgroundColor", "rgb(255, 255, 255)");
+        let em = d.add(Some(link), "i");
+        visible(&mut d, em);
+        d.add_text(em, "now");
+        d.set_rect(em, 40.0, 0.0, 30.0, 20.0);
+        assert!(!colors(&d, link).is_empty(), "{:?}", colors(&d, link));
+        let icon = d.add(Some(link), "svg");
+        visible(&mut d, icon);
+        d.set_rect(icon, 96.0, 2.0, 16.0, 16.0);
+        assert!(colors(&d, link).is_empty(), "{:?}", colors(&d, link));
+        // An SVG that names itself with a `<title>` is still the icon.
+        let title = d.add(Some(icon), "title");
+        d.add_text(title, "Open menu");
+        assert!(colors(&d, link).is_empty(), "{:?}", colors(&d, link));
+    }
+
+    /// An entrance caught at 0 that settles faint: the visibility gate counts
+    /// the box at its end frame (0.2), and the contrast fold must read the
+    /// same value, not the 1 it gives a box caught mid-reveal.
+    #[test]
+    fn a_timed_entrance_that_settles_faint_is_scored_faded() {
+        let (mut d, wrap, word) = muted_text_in_wrapper("span", "Settled copy", "rgb(10, 16, 21)");
+        d.keyframes.insert(
+            "fade-in".into(),
+            vec![
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0".into())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0.2".into())] },
+            ],
+        );
+        d.keyframe_keys.insert("fade-in".into(), vec!["0%".into(), "100%".into()]);
+        d.set_styles(
+            wrap,
+            &[
+                ("opacity", "0"),
+                ("animationName", "fade-in"),
+                ("animationIterationCount", "1"),
+                ("animationFillMode", "forwards"),
+                ("animationDirection", "normal"),
+                ("animationDuration", "0.6s"),
+                ("animationDelay", "2s"),
+                ("animationTimeline", "auto"),
+                ("animationPlayState", "running"),
+                ("animationComposition", "replace"),
+            ],
+        );
+        d.set_running_animations(wrap, &["opacity"]);
+        assert_eq!(crate::browser::painted::entrance_end_opacity(&d, wrap), Some(0.2));
+        assert!(!low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
+        // The same entrance settling at 1 is scored at full strength.
+        d.keyframes.insert(
+            "fade-in".into(),
+            vec![
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0".into())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "1".into())] },
+            ],
+        );
+        assert!(low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
     }
 
     #[test]
