@@ -9492,6 +9492,10 @@ mod tests {
         assert!(run(&|d, _, cover, _| { d.set_style(cover, "borderRadius", "160px"); }));
         assert!(run(&|d, _, cover, _| { d.set_style(cover, "borderRadius", "50%"); }));
         assert!(run(&|d, _, cover, _| { d.set_style(cover, "webkitBackgroundClip", "text"); }));
+        // A blend mode or a filter on the card changes what it leaves of the
+        // text: a white card at `multiply` leaves all of it.
+        assert!(run(&|d, _, cover, _| { d.set_style(cover, "mixBlendMode", "multiply"); }));
+        assert!(run(&|d, button, _, _| { d.set_style(button, "filter", "opacity(0.5)"); }));
     }
 
     /// A transparent grain overlay laid over a section below the fold: the

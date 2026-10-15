@@ -630,7 +630,8 @@ const FILL_COVER_BUDGET: usize = 3000;
 ///   or more, its background is clipped to the border or padding box, and
 ///   it is painted at capture;
 /// - every box from the fill up to the sibling has an opacity of at least
-///   [`FILL_COVER_MIN_ALPHA`] and no mask or clip-path;
+///   [`FILL_COVER_MIN_ALPHA`], no mask or clip-path, no `filter`, and
+///   `mix-blend-mode: normal`;
 /// - the fill's box, cut to every overflow clip up to the sibling and inset
 ///   by 0.3 of its largest corner radius, covers the text within a pixel.
 ///
@@ -713,7 +714,16 @@ fn fill_covers(
     let mut layered = false;
     let mut cur = Some(fill);
     while let Some(c) = cur {
-        if !z_auto(c) || !opaque(c) || masked_or_clipped(dom, c) {
+        // A blend mode or a filter changes what the fill leaves of the text
+        // under it: a white card at `multiply` leaves it all.
+        let blend = dom.style(c, "mixBlendMode");
+        let filter = dom.style(c, "filter");
+        if !z_auto(c)
+            || !opaque(c)
+            || masked_or_clipped(dom, c)
+            || !matches!(blend.as_str(), "normal" | "")
+            || !matches!(filter.as_str(), "none" | "")
+        {
             return false;
         }
         layered |= positioned(c);
