@@ -3714,6 +3714,44 @@ fn buried_under_the_page(dom: &dyn Dom, stack: &[ElId], victim: ElId, layer: ElI
     })
 }
 
+/// The points of `el`'s occlusion grid ([`occlusion_probe_points`]) that
+/// lie on its own lines of text.
+///
+/// Where the capture recorded the lines, a point off every line (the
+/// empty end of a wrapped paragraph's last line, its box past the
+/// words) has no text under it to cover, and the share is taken over
+/// the points on the lines. Under a rotation or skew a line's rect is
+/// the bounds of a tilted line, not the line, so the grid stands.
+fn occlusion_points_on_lines(dom: &dyn Dom, el: ElId, rect: &Rect, vw: f64, vh: f64) -> Vec<(f64, f64)> {
+    let points = occlusion_probe_points(rect, vw, vh);
+    let lines = if drawn_tilted(dom, el) {
+        None
+    } else {
+        // The lines of the victim's own text: a child's line on a row of
+        // its own is the child's text, which the probe already skips.
+        let own = dom.direct_text_rect(el).filter(|r| r.all_finite());
+        dom.text_line_rects(el)
+            .map(|l| {
+                l.into_iter()
+                    .filter(|r| {
+                        own.as_ref().map_or(true, |o| {
+                            r.top < o.bottom && r.bottom > o.top && r.left < o.right && r.right > o.left
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|l| !l.is_empty() && l.iter().all(|r| r.all_finite()))
+    }
+    // A grid none of whose points lands on a line (one centred line in a
+    // tall box, between two grid rows) says nothing either way; the
+    // whole grid stands.
+    .filter(|l| points.iter().any(|&(x, y)| l.iter().any(|r| rect_holds_point(r, x, y))));
+    points
+        .into_iter()
+        .filter(|&(x, y)| !lines.as_ref().is_some_and(|l| !l.iter().any(|r| rect_holds_point(r, x, y))))
+        .collect()
+}
+
 /// How many ancestors of a hit-test answer text-occlusion asks whether they
 /// are a moving ticker track.
 const MARQUEE_TRACK_MAX_DEPTH: usize = 4;
@@ -3970,6 +4008,17 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         text_els.push(TextEl { el, rect, text });
     }
 
+    let sr_only = |el: ElId, rect: &Rect| {
+        is_screen_reader_only_text_style(
+            Some(&ElStyle { dom, el }),
+            &SrOnlyMetrics {
+                width: Some(rect.width),
+                client_width: Some(dom.client_width(el)),
+                height: Some(rect.height),
+                client_height: Some(dom.client_height(el)),
+            },
+        )
+    };
     for victim in &text_els {
         let el = victim.el;
         let rect = &victim.rect;
@@ -3977,16 +4026,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if seen_victims.contains(&el) {
             continue;
         }
-        let style = ElStyle { dom, el };
-        if is_screen_reader_only_text_style(
-            Some(&style),
-            &SrOnlyMetrics {
-                width: Some(rect.width),
-                client_width: Some(dom.client_width(el)),
-                height: Some(rect.height),
-                client_height: Some(dom.client_height(el)),
-            },
-        ) {
+        if sr_only(el, rect) {
             continue;
         }
 
@@ -4005,8 +4045,9 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         let curtain = curtain_layer(dom, el).filter(|&layer| {
             *curtains.entry(layer).or_insert_with(|| {
                 let mut asked = 0usize;
-                for t in text_els.iter().filter(|t| t.el == layer || dom.contains(layer, t.el)) {
-                    for (x, y) in occlusion_probe_points(&t.rect, vw, vh) {
+                let in_layer = |t: &&TextEl| (t.el == layer || dom.contains(layer, t.el)) && !sr_only(t.el, &t.rect);
+                for t in text_els.iter().filter(in_layer) {
+                    for (x, y) in occlusion_points_on_lines(dom, t.el, &t.rect, vw, vh) {
                         asked += 1;
                         match dom.element_from_point(x, y) {
                             Some(a) if a != layer && !dom.contains(layer, a) => {}
@@ -4027,38 +4068,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         let mut occluded = 0usize;
         let mut occluder_el: Option<ElId> = None;
         let mut occluder_kind = "";
-        // Where the capture recorded the lines, a point off every line (the
-        // empty end of a wrapped paragraph's last line, its box past the
-        // words) has no text under it to cover, and the share is taken over
-        // the points on the lines. Under a rotation or skew a line's rect is
-        // the bounds of a tilted line, not the line, so the grid stands.
-        let points = occlusion_probe_points(rect, vw, vh);
-        let lines = if drawn_tilted(dom, el) {
-            None
-        } else {
-            // The lines of the victim's own text: a child's line on a row of
-            // its own is the child's text, which the probe already skips.
-            let own = dom.direct_text_rect(el).filter(|r| r.all_finite());
-            dom.text_line_rects(el)
-                .map(|l| {
-                    l.into_iter()
-                        .filter(|r| {
-                            own.as_ref().map_or(true, |o| {
-                                r.top < o.bottom && r.bottom > o.top && r.left < o.right && r.right > o.left
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .filter(|l| !l.is_empty() && l.iter().all(|r| r.all_finite()))
-        }
-        // A grid none of whose points lands on a line (one centred line in a
-        // tall box, between two grid rows) says nothing either way; the
-        // whole grid stands.
-        .filter(|l| points.iter().any(|&(x, y)| l.iter().any(|r| rect_holds_point(r, x, y))));
-        for (x, y) in points {
-            if lines.as_ref().is_some_and(|l| !l.iter().any(|r| rect_holds_point(r, x, y))) {
-                continue;
-            }
+        for (x, y) in occlusion_points_on_lines(dom, el, rect, vw, vh) {
             total += 1;
             let Some(top) = dom.element_from_point(x, y) else { continue };
             if top == el || dom.contains(el, top) || dom.contains(top, el) {
