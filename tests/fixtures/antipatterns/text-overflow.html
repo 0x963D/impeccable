@@ -66,6 +66,12 @@
     .term pre { margin: 0; padding: 16px; color: #9f9; font: 13px/1.6 monospace; }
     .excerpt { width: 340px; height: 80px; margin-left: calc(100vw - 400px); overflow: hidden; background: #f6f8fa; border: 1px solid #ddd; }
     .excerpt pre { margin: 0; padding: 12px; color: #333; font: 13px/1.6 monospace; }
+    /* A filled, padded pre in a terminal window that clips it. Its 16
+       letters overrun the 13-letter content box by 3 letters and end 1
+       letter past the pre's own edge, under the window's clip. Measured on
+       the padding box (scrollWidth) the spill is under 16px. */
+    .term-tight { display: inline-block; overflow: hidden; background: #000; }
+    .term-tight pre, .pre-painted { box-sizing: content-box; width: 13ch; margin: 0; padding: 8px 2ch; background: #1e1e2e; color: #9f9; font: 12px/16px monospace; white-space: pre; }
     .chip { display: inline-block; width: 120px; border: 1px solid #ccc; border-radius: 999px; padding: 4px 10px; white-space: nowrap; font: 14px sans-serif; }
     .hl { display: inline-block; background: #ffeb3b; padding: 0 4px; font-size: 44px; width: 200px; white-space: nowrap; }
     .typing { width: 360px; overflow: hidden; white-space: nowrap; font-size: 20px; line-height: 24px; }
@@ -196,6 +202,28 @@
   </div>
   <div class="row" style="padding-left: 0; padding-right: 0">
     <div class="excerpt"><pre><code class="pass-excerpt-code">export async function handler(request: Request, env: Env, ctx: ExecutionContext): Promise&lt;Response&gt; {</code></pre></div>
+  </div>
+
+  <!-- PASS: a filled, padded pre whose text ends just past its own edge,
+       inside a terminal window that clips it there. A clip around code is
+       the author's. -->
+  <div class="row">
+    <div class="term-tight"><pre class="pass-padded-pre-clipped">$ acme deploy -y</pre></div>
+  </div>
+  <!-- PASS: the same filled pre with nothing clipping it, its last letter
+       in free space. Code is reported only where it meets the viewport
+       edge or another box. -->
+  <div class="row">
+    <pre class="pre-painted pass-padded-pre-free-space">$ acme deploy -y</pre>
+  </div>
+
+  <!-- PASS: code that spills into free space beside a clipped column. The
+       left column cuts its long line at 200px, so the part of that line
+       laid out under the code's spill is never painted: nothing is there
+       for the code to run into. -->
+  <div class="row" style="display: grid; grid-template-columns: 200px 400px; column-gap: 24px; align-items: start">
+    <div class="ellipsis" style="width: 200px; font: 13px/20px monospace">a-clipped-line-that-lays-out-far-past-its-column-and-under-the-code</div>
+    <pre class="pass-pre-beside-clipped-text" style="width: 120px; margin: 0; font: 13px/20px monospace">a-line-into-free-space-here</pre>
   </div>
 
   <!-- PASS (r4-p19): a spill the scroll width measures into free space,

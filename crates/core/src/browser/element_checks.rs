@@ -2346,7 +2346,7 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
 
 /// The one child of `tile` that holds its icon as an emoji: the tile's own
 /// text is blank, it has exactly one element child, and that child has no
-/// children of its own and only emoji for text.
+/// children of its own, only emoji for text, and paints a box.
 fn emoji_only_child(dom: &dyn Dom, tile: ElId, tile_text: &str) -> Option<ElId> {
     if !js::trim(tile_text).is_empty() {
         return None;
@@ -2355,7 +2355,16 @@ fn emoji_only_child(dom: &dyn Dom, tile: ElId, tile_text: &str) -> Option<ElId> 
     let [only] = children.as_slice() else {
         return None;
     };
-    (dom.children(*only).is_empty() && is_emoji_only_text(&direct_text(dom, *only))).then_some(*only)
+    // The emoji has to paint: a `hidden` or invisible span is no icon, and
+    // its empty rect would pass the fills-the-tile test.
+    let r = dom.rect(*only);
+    (dom.children(*only).is_empty()
+        && is_emoji_only_text(&direct_text(dom, *only))
+        && is_painted_for_browser_rule(dom, *only)
+        && r.all_finite()
+        && r.width > 0.0
+        && r.height > 0.0)
+        .then_some(*only)
 }
 
 /// The weight and size a card title set on a `div` carries: shadcn's
@@ -4443,7 +4452,9 @@ const PAINTED_SPILL_MIN_PX: f64 = 2.0;
 /// measure. A trailing letter space ends the text rect past the last glyph,
 /// so it is taken off the end the text runs past. The text has to cross
 /// the content box: text indented wholly out of it (image replacement with
-/// nothing clipping it) is placed there, not running out.
+/// nothing clipping it) is placed there, not running out. Code is held to
+/// the bar [`spill_does_harm`] sets for it: a clip around it ends the spill,
+/// and free space beside it does too.
 fn spill_past_painted_box(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<f64> {
     if !generates_box(dom, el) {
         return None;
@@ -4505,6 +4516,12 @@ fn spill_past_painted_box(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<f64> {
         return None;
     }
     if !(super::page_checks::fill_differs_from_surface(dom, el) || draws_a_border(dom, el)) {
+        return None;
+    }
+    // Code keeps its own bar on this path too: a clip around it is the
+    // author's (a padded `pre` in a terminal window), and an unclipped
+    // sample reports only where it reaches the viewport edge or another box.
+    if is_code_text(dom, el) && !spill_does_harm(dom, el, (content_left, content_right), (text_left, text_right)) {
         return None;
     }
     Some(past_border)
@@ -4697,12 +4714,54 @@ fn spill_meets_another_box(
                 right = js::math_max(right, t.right);
             }
         }
+        // What a clip cuts off is never painted: a long line hidden past
+        // its column's edge is not there for the spill to run into.
+        let Some((left, right)) = clip_x_extent(dom, other, (left, right)) else {
+            continue;
+        };
         let meets = regions.iter().any(|&(a, b)| right > a && left < b);
         if meets && is_rendered_for_browser_rule(dom, other) {
             return true;
         }
     }
     false
+}
+
+/// The part of `extent` (`(left, right)`, the box and text of `el`) that
+/// the boxes clipping x overflow around it leave painted: `el` itself and
+/// each ancestor below the body that hides or clips x overflow cut it at
+/// their padding box. `None` when nothing is left. A clip with no measured
+/// area cuts nothing here; the paint gate decides what it hides.
+fn clip_x_extent(dom: &dyn Dom, el: ElId, extent: (f64, f64)) -> Option<(f64, f64)> {
+    let (mut left, mut right) = extent;
+    let root = dom.document_element();
+    let body = dom.body();
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if Some(c) == root || Some(c) == body {
+            break;
+        }
+        if generates_box(dom, c)
+            && matches!(crate::browser::text_geometry::overflow_x(dom, c).as_str(), "hidden" | "clip")
+        {
+            let r = dom.rect(c);
+            if r.all_finite() && r.width > 0.0 && r.height > 0.0 {
+                let client = dom.client_width(c);
+                let (l, rr) = if client.is_finite() && client > 0.0 {
+                    let l = r.left + dom.client_left(c);
+                    (l, l + client)
+                } else {
+                    (r.left, r.right)
+                };
+                if l.is_finite() && rr.is_finite() {
+                    left = js::math_max(left, l);
+                    right = js::math_min(right, rr);
+                }
+            }
+        }
+        cur = dom.parent(c);
+    }
+    (right > left).then_some((left, right))
 }
 
 /// Thickness at or under which a positioned box with no text is a rule line

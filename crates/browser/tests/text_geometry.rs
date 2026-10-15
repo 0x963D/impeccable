@@ -320,6 +320,9 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "pass-excerpt-code",
             "pass-chip-free-space",
             "pass-highlighter-free-space",
+            "pass-padded-pre-clipped",
+            "pass-padded-pre-free-space",
+            "pass-pre-beside-clipped-text",
         ],
         "text-overflow",
     );

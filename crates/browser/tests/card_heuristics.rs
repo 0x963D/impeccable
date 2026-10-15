@@ -301,7 +301,7 @@ fn label_collectors_climb_and_scale() {
             "Contents Wrapped Tile",
             "Emoji In A Span",
         ],
-        &["Far From The Tile", "Sarah Chen", "Inline Side By Side", "Word In A Span"],
+        &["Far From The Tile", "Sarah Chen", "Inline Side By Side", "Word In A Span", "Hidden Emoji In A Span"],
     );
 
     let Some(findings) = scan("kicker-above-heading.html") else {

@@ -276,6 +276,7 @@ mod tests {
         assert_eq!(overused_font_name("geistsans"), Some("geist sans"));
         assert_eq!(overused_font_name("geist sans"), Some("geist sans"));
         assert_eq!(overused_font_name("geist-mono"), Some("geist mono"));
+        assert_eq!(overused_font_name("space_grotesk"), Some("space grotesk"));
         assert_eq!(overused_font_name("plusjakartasans"), Some("plus jakarta sans"));
         assert_eq!(overused_font_name("inter"), Some("inter"));
         assert_eq!(overused_font_name("intertight"), None);
