@@ -10,8 +10,10 @@
     caught. A call to action still waiting out its entrance delay is read at
     the entrance's end frame. A notification row a paused loop holds part
     way through its fade is a frame of the loop, so no pass reads it faded.
-    A white link on its own white card is a real 1.0:1, which the link path
-    used to drop as a walk that missed the photo. The site's name set huge
+    A white link that is the whole label of its control, on its own white
+    card, is a real 1.0:1, which the link path used to drop as a walk that
+    missed the photo. A white label beside the bars of a menu button in a
+    white header, and a white note in no control, are hidden on purpose. The site's name set huge
     and faint in the footer is a decorative shape and reports as advisory.
   -->
   <style>
@@ -34,11 +36,18 @@
     .hero { position: relative; height: 120px; }
     .hero img { position: absolute; inset: 0; width: 100%; height: 120px; }
     .hero .over { position: relative; padding: 40px 24px; }
+    .site-header { width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; padding: 16px 0; background: #ffffff; }
+    .menu-toggle { display: flex; gap: 8px; align-items: center; background: none; border: 0; font: 400 14px/20px system-ui; }
+    .menu-label { color: #ffffff; }
+    .bars { width: 20px; height: 14px; border-top: 2px solid #111111; border-bottom: 2px solid #111111; }
+    .aside-wrap { background: #ffffff; padding: 16px; }
+    .aside-note { font: 400 14px/20px system-ui; color: #ffffff; }
     footer { width: 1200px; margin: 0 auto; overflow: hidden; }
     .wordmark { display: block; font: 700 200px/1 system-ui; color: rgba(0, 0, 0, 0.07); white-space: nowrap; }
   </style>
 </head>
 <body>
+  <header class="site-header"><strong>Northwind</strong><button class="menu-toggle" type="button"><span class="menu-label" id="pass-hidden-menu-label">Menu</span><span class="bars"></span></button></header>
   <main>
     <div class="col">
       <h1>Should flag</h1>
@@ -49,6 +58,7 @@
     <div class="col">
       <h1>Should pass</h1>
       <div class="case"><div class="notif loop"><p id="pass-row-in-a-paused-loop">Quiz on Thursday, room B-205</p></div></div>
+      <div class="case"><div class="aside-wrap"><span class="aside-note" id="pass-opens-in-a-new-tab">Opens in a new tab</span></div></div>
       <div class="case"><div class="hero"><img alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGOQs4nCihiGlgQAhsctASkFMAkAAAAASUVORK5CYII="><div class="over"><a class="ghost-link" id="pass-white-link-on-photo" href="#tour">Take the tour</a></div></div></div>
     </div>
   </main>

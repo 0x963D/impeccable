@@ -255,6 +255,41 @@ pub const BACKDROP_NEAR_OPAQUE_ALPHA: f64 = 0.8;
 /// sampled pass does not.
 pub const BACKDROP_UNDER_NEAR_OPAQUE_FILL: &str = "backdrop filter under a near-opaque fill";
 
+/// How far, as a WCAG ratio, every `text-shadow` layer composited over the
+/// ink has to sit from the ink for the halo to separate the glyphs from
+/// their ground ([`halo_separates_ink`]).
+pub const HALO_MIN_SEPARATION: f64 = 2.0;
+
+/// Whether every layer of `el`'s `text-shadow` stands apart from its ink:
+/// composited over the ink colour, each layer reaches
+/// [`HALO_MIN_SEPARATION`]. rhem.ai's `rgba(34, 35, 33, 0.55) 0 2px 12px`
+/// under near-white copy does, and a reader sees the copy over it. A glow in
+/// the ink's own colour (neon text), a white glow under white copy, a dark
+/// drop shadow under grey copy, a layer with no colour of its own (it takes
+/// `currentColor`) and a shadow that does not parse do not: under the glyphs
+/// such a layer is either the ink again or hidden by the glyph, and it says
+/// nothing about the ground a reader sees. The pixel pass keeps a halo in its
+/// second shot only when this holds.
+pub fn halo_separates_ink(dom: &dyn Dom, el: ElId) -> bool {
+    let Some(ink) = parse_rgb_or_any(&dom.style(el, "color")) else {
+        return false;
+    };
+    let ink = Rgba { a: Some(1.0), ..ink };
+    let shadow = dom.style(el, "textShadow");
+    let shadow = js::trim(&shadow);
+    if shadow.is_empty() || shadow == "none" {
+        return false;
+    }
+    let layers = crate::js_ext_a::split_commas_outside_parens(shadow);
+    !layers.is_empty()
+        && layers.iter().all(|layer| {
+            crate::checks::rules::find_shadow_color(layer)
+                .and_then(|info| info.color)
+                .and_then(|c| blend_rgba(Some(&c), Some(&ink)))
+                .is_some_and(|over| contrast_ratio(&ink, &over) >= HALO_MIN_SEPARATION)
+        })
+}
+
 /// Replaced boxes that paint a picture rather than a colour.
 const MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas"];
 
@@ -2198,6 +2233,11 @@ fn candidate_value(dom: &dyn Dom, el: ElId, tag: &str, direct: &str, rect: &Rect
     if super::decorative_text::is_decorative_text_dom(dom, el) {
         m.insert("decorative".into(), Value::Bool(true));
     }
+    // A halo that separates the glyphs from their ground may stay in the
+    // pixel pass's second shot; the key is only written when it holds.
+    if reasons.iter().any(|r| r == "text shadow") && halo_separates_ink(dom, el) {
+        m.insert("haloSeparates".into(), Value::Bool(true));
+    }
     if let Some(identity) = identity {
         m.insert("match".into(), identity);
     }
@@ -3544,6 +3584,9 @@ const GLYPH_BODY_COVERAGE: f64 = 0.75;
 /// page repainted between the two screenshots (a video, a carousel, a reveal
 /// animation) and no pixel pair is a glyph over its background.
 const GLYPH_CHURN_SHARE: f64 = 0.55;
+/// The reason [`pixel_contrast_verdict`] gives where most of the clip
+/// changed between the two shots.
+pub const BOX_REPAINTED: &str = "box repainted between captures";
 /// Hiding text moves every pixel it painted the same way: toward the surface
 /// under it. A box where a large minority moved the other way holds something
 /// that arrived or left between the captures — text mid-animation leaves its
@@ -3602,7 +3645,7 @@ pub fn pixel_contrast_verdict(
         return PixelContrastOutcome::Unresolved("too few glyph pixels");
     }
     if clip_pixels > 0 && pixels.len() as f64 > clip_pixels as f64 * GLYPH_CHURN_SHARE {
-        return PixelContrastOutcome::Unresolved("box repainted between captures");
+        return PixelContrastOutcome::Unresolved(BOX_REPAINTED);
     }
     let darkened = pixels.iter().filter(|p| p.darkened).count();
     let minority = darkened.min(pixels.len() - darkened);
@@ -3922,6 +3965,32 @@ mod tests {
         d.set_styles(header, &[("backgroundColor", "rgb(0, 0, 0)"), ("backdropFilter", "none"), ("display", "contents")]);
         let reasons = collect_visual_contrast_reasons(&d, p);
         assert!(reasons.iter().any(|r| r == "image background"), "{reasons:?}");
+    }
+
+    /// A halo is kept for the pixels' second reading only where every layer
+    /// stands apart from the ink: rhem.ai's dark halo under near-white copy,
+    /// not a neon glow in the ink's colour or a drop shadow under grey copy.
+    #[test]
+    fn a_halo_separates_ink_only_when_every_layer_stands_apart() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let p = d.add(Some(body), "p");
+        let halo = |d: &mut FakeDom, ink: &str, shadow: &str| {
+            d.set_styles(p, &[("color", ink), ("textShadow", shadow)]);
+            halo_separates_ink(d, p)
+        };
+        assert!(halo(&mut d, "rgb(251, 250, 248)", "rgba(34, 35, 33, 0.55) 0px 2px 12px"));
+        assert!(halo(&mut d, "rgb(255, 255, 255)", "rgba(0, 0, 0, 0.624) 0px 0px 10px"));
+        assert!(!halo(
+            &mut d,
+            "rgb(244, 114, 182)",
+            "rgb(244, 114, 182) 0px 0px 4px, rgb(244, 114, 182) 0px 0px 10px, rgb(219, 39, 119) 0px 0px 20px"
+        ));
+        assert!(!halo(&mut d, "rgb(117, 117, 117)", "rgba(0, 0, 0, 0.3) 0px 2px 4px"));
+        assert!(!halo(&mut d, "rgb(255, 255, 255)", "rgba(255, 255, 255, 0.9) 0px 0px 8px"));
+        // One layer in the ink's colour is enough to keep the halo hidden.
+        assert!(!halo(&mut d, "rgb(255, 255, 255)", "rgba(0, 0, 0, 0.6) 0px 0px 10px, rgb(255, 255, 255) 0px 0px 2px"));
+        assert!(!halo(&mut d, "rgb(255, 255, 255)", "none"));
     }
 
     /// smartbi.ca's header (`rgba(18, 36, 44, 0.94)` with `blur(12px)`) and

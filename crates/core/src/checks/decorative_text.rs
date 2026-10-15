@@ -38,7 +38,8 @@
 //!   mockup as advisory too.
 //! - **Ghost wordmarks**: the site's own name set as a shape, not a line to
 //!   read: display type at [`WORDMARK_MIN_PX`] or more, or at
-//!   [`WORDMARK_H1_SCALE`] times the page's largest `h1`, painted at
+//!   [`WORDMARK_H1_SCALE`] times the page's largest `h1` (and at least
+//!   [`WORDMARK_H1_PATH_MIN_PX`]), painted at
 //!   [`WORDMARK_MAX_OPACITY`] or less (its opacity and its ink's alpha
 //!   together), whose words are the site's name (screen.movie's 222px
 //!   "Screen Movie" at 0.1 in the footer, incredible.one's 272px
@@ -64,6 +65,9 @@ pub const AVATAR_CENTRE_TOLERANCE: f64 = 0.15;
 pub const WORDMARK_MIN_PX: f64 = 120.0;
 /// Type at least this many times the page's largest `h1` is display type.
 pub const WORDMARK_H1_SCALE: f64 = 3.0;
+/// The least size the [`WORDMARK_H1_SCALE`] path accepts, so a page whose
+/// `h1` is a small logo does not make body-sized type display.
+pub const WORDMARK_H1_PATH_MIN_PX: f64 = 80.0;
 /// The most a wordmark may show of its ink, its opacity and its colour's
 /// alpha together, and still be a shape rather than a line to read.
 pub const WORDMARK_MAX_OPACITY: f64 = 0.25;
@@ -190,7 +194,8 @@ pub fn classify_decorative_text(f: &DecorativeTextFacts) -> Option<DecorativeSha
 pub fn is_wordmark_size(font_size: f64, largest_h1: f64) -> bool {
     font_size.is_finite()
         && font_size > 0.0
-        && (font_size >= WORDMARK_MIN_PX || (largest_h1 > 0.0 && font_size >= largest_h1 * WORDMARK_H1_SCALE))
+        && (font_size >= WORDMARK_MIN_PX
+            || (largest_h1 > 0.0 && font_size >= WORDMARK_H1_PATH_MIN_PX && font_size >= largest_h1 * WORDMARK_H1_SCALE))
 }
 
 /// The words of `text`, lower-cased, letters and digits only.
@@ -524,6 +529,8 @@ mod tests {
         // Read as a line: visible enough, small, another word, or a control.
         assert_eq!(shape(&ghost("Screen Movie", 222.0, 64.0, 0.4)), None);
         assert_eq!(shape(&ghost("Screen Movie", 96.0, 48.0, 0.1)), None);
+        // A small logo h1 does not make body-sized type display.
+        assert_eq!(shape(&ghost("Screen Movie", 60.0, 16.0, 0.1)), None);
         assert_eq!(shape(&ghost("Record faster", 222.0, 64.0, 0.1)), None);
         assert_eq!(shape(&ghost("Movie", 222.0, 64.0, 0.1)), None);
         assert_eq!(shape(&DecorativeTextFacts { control_label: true, ..ghost("Screen Movie", 222.0, 64.0, 0.1) }), None);

@@ -181,6 +181,44 @@ fn collapse_ws(s: &str) -> String {
     WS_RUN.replace_all(s, " ").into_owned()
 }
 
+/// Whether `el`'s text is the whole visible content of the link or button
+/// around it (or that it is): the control's text is `el`'s text, and nothing
+/// else in the control paints, neither a picture, an icon or an SVG, nor a box
+/// with a fill, a background image or a border (a hamburger's bars). Boxes
+/// that hold `el`, and boxes inside it, do not count.
+fn sole_visible_label_of_control(dom: &dyn Dom, el: ElId) -> bool {
+    let Some(control) = closest_or_none(dom, el, "a, button, [role=\"button\"]") else {
+        return false;
+    };
+    let text = |n: ElId| collapse_ws(js::trim(&dom.text_content(n)));
+    let own = text(el);
+    if own.is_empty() || text(control) != own {
+        return false;
+    }
+    let paints = |n: ElId| {
+        if matches!(tag_lower(dom, n).as_str(), "svg" | "img" | "picture" | "canvas" | "video" | "i" | "object" | "embed") {
+            return true;
+        }
+        let r = dom.rect(n);
+        if !(r.width > 0.0 && r.height > 0.0) {
+            return false;
+        }
+        let fill = parse_rgb_or_any(&dom.style(n, "backgroundColor")).is_some_and(|c| c.alpha_or_one() > 0.1);
+        let image = dom.style(n, "backgroundImage");
+        let image = !image.is_empty() && image != "none";
+        let border = ["Top", "Right", "Bottom", "Left"].iter().any(|side| {
+            parse_float(&dom.style(n, &format!("border{side}Width"))) > 0.0
+                && parse_rgb_or_any(&dom.style(n, &format!("border{side}Color"))).is_some_and(|c| c.alpha_or_one() > 0.1)
+        });
+        fill || image || border
+    };
+    dom.query_all(Some(control), "*")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&n| n != el && !dom.contains(n, el) && !dom.contains(el, n))
+        .all(|n| !paints(n))
+}
+
 /// JS `Math.round(x)` rendered as `${...}`.
 fn round_str(x: f64) -> String {
     number_to_string(math_round(x))
@@ -2019,13 +2057,17 @@ pub fn check_element_colors_dom(
                 || under().0 != crate::browser::visual::LayerUnder::Ancestor))
             || (on_page_ground(dom, surface_host) && crate::browser::visual::page_ground_paints_picture(dom)));
     // On the link and span path a surface in the ink's own colour is taken
-    // only from a box of the page's own (v0-memorialqrwebsitecode-90's white
-    // "Start Chat" on its white card). The page ground is the walk's
+    // only for the whole visible label of a link or button on a box of the
+    // page's own (v0-memorialqrwebsitecode-90's white "Start Chat" on its
+    // white card, an invisible ghost link). The page ground is the walk's
     // fallback, and the stacks confirm it for text whose real ground the
-    // capture does not record: a browser's dark JSON viewer read as the white
-    // canvas, a menu button's hidden white label in a white header. The full
-    // pass keeps its own reading of the page ground.
-    let safe_tag_on_page_ground = same_hex && on_page_ground(dom, surface_host);
+    // capture does not record (a browser's dark JSON viewer read as the white
+    // canvas). A label beside an icon in the same control (valero.com's white
+    // "Toggle Navigation" in its bars button, a hidden "Menu" in a white
+    // header) or a span outside any control ("Opens in a new tab") is text
+    // the page hides on purpose. The full pass keeps its own reading.
+    let safe_tag_same_hex_dropped =
+        same_hex && (on_page_ground(dom, surface_host) || !sole_visible_label_of_control(dom, el));
     // What the glyphs and their surface paint: a filter on a box that holds
     // the surface repaints both, and the verdicts read what it paints; one
     // the engine cannot model leaves none (`ink_paint`). The structural tests
@@ -2125,7 +2167,7 @@ pub fn check_element_colors_dom(
     };
     // Only on the link and span path: a styled control takes the full pass,
     // which keeps its own reading of the page ground.
-    if safe_tag_on_page_ground && crate::checks::rules::scores_safe_tag_text(&color_opts) {
+    if safe_tag_same_hex_dropped && crate::checks::rules::scores_safe_tag_text(&color_opts) {
         color_opts.same_color_surface_is_unread = true;
     }
     // A contrast verdict is about the surface the walk resolved. Where the
@@ -5751,6 +5793,24 @@ mod tests {
             "{:?}",
             colors(&d, label)
         );
+        // A label the page hides on purpose: beside the bars of its menu
+        // button, or a span in no control at all, on a white header.
+        let (mut d, wrap, button) = muted_text_in_wrapper("button", "", "rgb(17, 17, 17)");
+        d.set_style(wrap, "backgroundColor", "rgb(255, 255, 255)");
+        let label = d.add(Some(button), "span");
+        visible(&mut d, label);
+        d.add_text(label, "Menu");
+        d.set_rect(label, 0.0, 0.0, 40.0, 20.0);
+        d.set_styles(label, &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("color", "rgb(255, 255, 255)"), ("fontSize", "14px"), ("fontWeight", "400")]);
+        assert!(!colors(&d, label).is_empty(), "{:?}", colors(&d, label));
+        let bars = d.add(Some(button), "span");
+        visible(&mut d, bars);
+        d.set_rect(bars, 48.0, 3.0, 20.0, 14.0);
+        d.set_styles(bars, &[("borderTopWidth", "2px"), ("borderTopColor", "rgb(17, 17, 17)")]);
+        assert!(colors(&d, label).is_empty(), "{:?}", colors(&d, label));
+        let (mut d, wrap, span) = muted_text_in_wrapper("span", "Opens in a new tab", "rgb(254, 254, 254)");
+        d.set_style(wrap, "backgroundColor", "rgb(254, 254, 254)");
+        assert!(colors(&d, span).is_empty(), "{:?}", colors(&d, span));
     }
 
     #[test]

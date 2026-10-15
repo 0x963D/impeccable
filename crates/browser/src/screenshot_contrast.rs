@@ -485,22 +485,27 @@ fn bring_into_view(
     Some((moved, moved_clip))
 }
 
-/// Whether the second shot hides the candidate's `text-shadow` with its
-/// glyphs: only for outlined text (`text outline`, [`visual::text_outlined`]),
-/// whose zero-blur offset shadows draw the outline the glyphs are read in.
-/// Any other shadow is a halo the glyphs sit on, and stays in both shots.
-fn hides_shadow_with_glyphs(candidate: &Value, reasons: &[String]) -> bool {
-    candidate.get("routed").and_then(Value::as_str) == Some("text outline")
-        || reasons.iter().any(|r| r == "text outline")
+/// Whether the pixel pass may take a second reading with the candidate's
+/// `text-shadow` kept, once the reading with it hidden is refused as a box
+/// repainted between captures: the core found that every shadow layer
+/// separates the glyphs from their ground (`haloSeparates`,
+/// [`visual::halo_separates_ink`]), and the text is not outlined, whose
+/// zero-blur offset shadows draw the outline it is read in.
+fn may_keep_halo(candidate: &Value, reasons: &[String]) -> bool {
+    let outlined = candidate.get("routed").and_then(Value::as_str) == Some("text outline")
+        || reasons.iter().any(|r| r == "text outline");
+    !outlined && candidate.get("haloSeparates").and_then(Value::as_bool) == Some(true)
 }
 
-/// The pixel pair for one candidate at `clip`: text painted, then hidden.
-/// Hiding takes the glyphs' fill and stroke, and keeps a `text-shadow` in
-/// both shots, so the glyphs are read over the halo a reader sees them on.
-/// Removing it repainted most of the clip (rhem.ai's `0 2px 12px` dark halo
-/// over a pale video frame), and the pass refused the box as repainted
-/// between captures. Outlined text is the exception
-/// ([`hides_shadow_with_glyphs`]).
+/// The pixel pair for one candidate at `clip`: text painted, then hidden
+/// with its `text-shadow`, as the pass always read it. Where that reading is
+/// refused because most of the clip repainted, which a wide dark halo under
+/// light copy causes (rhem.ai's `0 2px 12px` halo over a pale video frame),
+/// and the halo separates the glyphs from their ground ([`may_keep_halo`]),
+/// the text is hidden again with its halo kept and read over the halo a
+/// reader sees it on. A glow in the ink's own colour or a drop shadow under
+/// dark ink is never kept: under the glyphs it is the ink again, or hidden by
+/// the glyph, and a reading over it fails text that reads well.
 fn measure_candidate(
     page: &mut Page<'_>,
     candidate: &Value,
@@ -508,82 +513,15 @@ fn measure_candidate(
     clip: Clip,
 ) -> CdpResult<PixelMeasure> {
     let before = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height)?;
-    let token = format!(
-        "impeccable-contrast-{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
-        rand_token()
-    );
-    let selector = candidate
-        .get("selector")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let bgclip = candidate
-        .get("backgroundClipText")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let outlined = hides_shadow_with_glyphs(candidate, reasons);
-    let apply_expr = format!(
-        r#"(({{ selector, match, token, backgroundClipText, outlined }}) => {{
-    const el = ({PICK_CANDIDATE_JS})(selector, match);
-    if (!el) return false;
-    let style = document.getElementById('impeccable-visual-contrast-hide-style');
-    if (!style) {{
-      style = document.createElement('style');
-      style.id = 'impeccable-visual-contrast-hide-style';
-      style.textContent = [
-        '[data-impeccable-visual-contrast-target] {{',
-        '  color: transparent !important;',
-        '  -webkit-text-fill-color: transparent !important;',
-        '  -webkit-text-stroke-color: transparent !important;',
-        '}}',
-        'text[data-impeccable-visual-contrast-target], tspan[data-impeccable-visual-contrast-target] {{',
-        '  fill: transparent !important;',
-        '  stroke: transparent !important;',
-        '}}',
-        '[data-impeccable-visual-contrast-target][data-impeccable-bgclip-text="true"] {{',
-        '  background-image: none !important;',
-        '}}',
-        '[data-impeccable-visual-contrast-target][data-impeccable-outlined-text="true"] {{',
-        '  text-shadow: none !important;',
-        '}}',
-      ].join('\n');
-      document.head.appendChild(style);
-    }}
-    el.setAttribute('data-impeccable-visual-contrast-target', token);
-    if (backgroundClipText) el.setAttribute('data-impeccable-bgclip-text', 'true');
-    if (outlined) el.setAttribute('data-impeccable-outlined-text', 'true');
-    return true;
-  }})({})"#,
-        json!({ "selector": selector, "match": candidate.get("match").cloned().unwrap_or(Value::Null), "token": token, "backgroundClipText": bgclip, "outlined": outlined })
-    );
-    let applied = page.evaluate_value(&apply_expr)?;
-    if applied.as_bool() != Some(true) {
-        return Ok(PixelMeasure::default());
-    }
-    let after = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height);
-    // finally: remove the marker attributes (errors swallowed).
-    let cleanup_expr = format!(
-        r#"(({{ token }}) => {{
-      for (const el of document.querySelectorAll('[data-impeccable-visual-contrast-target]')) {{
-        if (el.getAttribute('data-impeccable-visual-contrast-target') !== token) continue;
-        el.removeAttribute('data-impeccable-visual-contrast-target');
-        el.removeAttribute('data-impeccable-bgclip-text');
-        el.removeAttribute('data-impeccable-outlined-text');
-      }}
-    }})({})"#,
-        json!({ "token": token })
-    );
-    let _ = page.evaluate(&cleanup_expr);
-    let after = after?;
-    let metrics = compare_screenshot_contrast(&before, &after, candidate)
-        .map_err(crate::cdp::CdpError::new)?;
-    let Some(metrics) = metrics else {
+    let Some(mut metrics) = hidden_reading(page, candidate, clip, &before, false)? else {
         return Ok(PixelMeasure::default());
     };
+    if metrics.outcome == PixelContrastOutcome::Unresolved(visual::BOX_REPAINTED) && may_keep_halo(candidate, reasons) {
+        match hidden_reading(page, candidate, clip, &before, true)? {
+            Some(kept) => metrics = kept,
+            None => return Ok(PixelMeasure::default()),
+        }
+    }
     let PixelContrastOutcome::Verdict {
         measured, median, ..
     } = metrics.outcome
@@ -628,6 +566,89 @@ fn measure_candidate(
             &text_label,
         ),
     }) })
+}
+
+/// Hide the candidate's glyphs (and, unless `keep_halo`, its `text-shadow`),
+/// take the second shot at `clip`, put the page back, and compare it with
+/// `before`. `None` where the element is gone or the shots do not compare.
+fn hidden_reading(
+    page: &mut Page<'_>,
+    candidate: &Value,
+    clip: Clip,
+    before: &str,
+    keep_halo: bool,
+) -> CdpResult<Option<ContrastMetrics>> {
+    let token = format!(
+        "impeccable-contrast-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        rand_token()
+    );
+    let selector = candidate
+        .get("selector")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let bgclip = candidate
+        .get("backgroundClipText")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let apply_expr = format!(
+        r#"(({{ selector, match, token, backgroundClipText, keepHalo }}) => {{
+    const el = ({PICK_CANDIDATE_JS})(selector, match);
+    if (!el) return false;
+    let style = document.getElementById('impeccable-visual-contrast-hide-style');
+    if (!style) {{
+      style = document.createElement('style');
+      style.id = 'impeccable-visual-contrast-hide-style';
+      style.textContent = [
+        '[data-impeccable-visual-contrast-target] {{',
+        '  color: transparent !important;',
+        '  -webkit-text-fill-color: transparent !important;',
+        '  -webkit-text-stroke-color: transparent !important;',
+        '}}',
+        '[data-impeccable-visual-contrast-target]:not([data-impeccable-keep-halo="true"]) {{',
+        '  text-shadow: none !important;',
+        '}}',
+        'text[data-impeccable-visual-contrast-target], tspan[data-impeccable-visual-contrast-target] {{',
+        '  fill: transparent !important;',
+        '  stroke: transparent !important;',
+        '}}',
+        '[data-impeccable-visual-contrast-target][data-impeccable-bgclip-text="true"] {{',
+        '  background-image: none !important;',
+        '}}',
+      ].join('\n');
+      document.head.appendChild(style);
+    }}
+    el.setAttribute('data-impeccable-visual-contrast-target', token);
+    if (backgroundClipText) el.setAttribute('data-impeccable-bgclip-text', 'true');
+    if (keepHalo) el.setAttribute('data-impeccable-keep-halo', 'true');
+    return true;
+  }})({})"#,
+        json!({ "selector": selector, "match": candidate.get("match").cloned().unwrap_or(Value::Null), "token": token, "backgroundClipText": bgclip, "keepHalo": keep_halo })
+    );
+    let applied = page.evaluate_value(&apply_expr)?;
+    if applied.as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let after = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height);
+    // finally: remove the marker attributes (errors swallowed).
+    let cleanup_expr = format!(
+        r#"(({{ token }}) => {{
+      for (const el of document.querySelectorAll('[data-impeccable-visual-contrast-target]')) {{
+        if (el.getAttribute('data-impeccable-visual-contrast-target') !== token) continue;
+        el.removeAttribute('data-impeccable-visual-contrast-target');
+        el.removeAttribute('data-impeccable-bgclip-text');
+        el.removeAttribute('data-impeccable-keep-halo');
+      }}
+    }})({})"#,
+        json!({ "token": token })
+    );
+    let _ = page.evaluate(&cleanup_expr);
+    let after = after?;
+    compare_screenshot_contrast(before, &after, candidate).map_err(crate::cdp::CdpError::new)
 }
 
 /// The pixel pass's snippet. The verdict and the median print against the
@@ -684,20 +705,20 @@ mod tests {
     use super::*;
     use impeccable_core::js::to_fixed;
 
-    /// A halo stays in both shots; an outline drawn by offset shadows is
-    /// the ink and goes with the glyphs.
+    /// The halo is kept for a second reading only where the core found it
+    /// separates the ink, and never for outlined text.
     #[test]
-    fn only_outlined_text_hides_its_shadow() {
+    fn only_a_separating_halo_is_kept() {
         let halo = vec!["text shadow".to_string(), "unread layer".to_string()];
-        assert!(!hides_shadow_with_glyphs(&json!({ "routed": "unread layer" }), &halo));
-        assert!(hides_shadow_with_glyphs(&json!({ "routed": "text outline" }), &["text shadow".to_string()]));
+        assert!(may_keep_halo(&json!({ "routed": "unread layer", "haloSeparates": true }), &halo));
+        assert!(!may_keep_halo(&json!({ "routed": "unread layer" }), &halo));
+        assert!(!may_keep_halo(&json!({ "routed": "text outline", "haloSeparates": true }), &halo));
         let outlined = vec!["text shadow".to_string(), "text outline".to_string()];
-        assert!(hides_shadow_with_glyphs(&json!({}), &outlined));
-        // The hide style no longer clears every shadow.
+        assert!(!may_keep_halo(&json!({ "haloSeparates": true }), &outlined));
+        // The first reading hides every shadow, as it always did.
         let src = include_str!("screenshot_contrast.rs");
-        let base_rule = src.split("'[data-impeccable-visual-contrast-target] {{',").nth(1).unwrap_or("");
-        let base_rule = base_rule.split("'}}',").next().unwrap_or("");
-        assert!(base_rule.contains("color: transparent") && !base_rule.contains("text-shadow"), "{base_rule}");
+        assert!(src.contains("'[data-impeccable-visual-contrast-target]:not([data-impeccable-keep-halo=\"true\"]) {{',"));
+        assert!(src.contains("'  text-shadow: none !important;',"));
     }
 
     /// A slotted element scrolls inside its host's shadow frame: bringing it

@@ -158,9 +158,9 @@ fn shown_opacity(dom: &dyn Dom, el: ElId) -> f64 {
 
 /// The names the site goes by: its host name run together and without its
 /// top-level label (`screen.movie` gives `screenmovie` and `screen`), its
-/// `og:site_name` or `application-name`, its title, and the title's parts
-/// between separators (`Incredible · AI that does tasks` gives
-/// `Incredible`).
+/// `og:site_name` or `application-name`, its title, and the title's first
+/// and last parts between separators (`Incredible · AI that does tasks`
+/// gives `Incredible`).
 fn site_names(dom: &dyn Dom) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let host = js::to_lower_case(&dom.hostname());
@@ -181,12 +181,19 @@ fn site_names(dom: &dyn Dom) -> Vec<String> {
     }
     if let Some(title) = dom.query_one(None, "title").ok().flatten() {
         let title = collapsed_text(dom, title);
-        names.extend(
-            title
-                .split(['|', '·', '•', '—', '–', ':', '-'])
-                .map(|part| js::trim(part).to_string())
-                .filter(|part| !part.is_empty()),
-        );
+        // The site's name opens or closes a title (`Incredible · AI that
+        // does tasks`, `Pricing | Acme`); a part in the middle is a page or
+        // section name. A hyphen joins words (`e-commerce`) and separates
+        // nothing here.
+        let parts: Vec<String> = title
+            .split(['|', '·', '•', '—', '–', ':'])
+            .map(|part| js::trim(part).to_string())
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.len() > 1 {
+            names.push(parts[0].clone());
+            names.push(parts[parts.len() - 1].clone());
+        }
         names.push(title);
     }
     names
@@ -291,6 +298,13 @@ mod tests {
         d.set_style(mark, "color", "rgb(255, 255, 255)");
         d.set_style(footer, "opacity", "0.1");
         assert_eq!(decorative_text_shape_dom(&d, mark), Some(DecorativeShape::Wordmark));
+        // A section name in the middle of a title is not the site's name,
+        // and a hyphen separates nothing.
+        d.add_text(title, " | Blog | Latest");
+        let blog = d.add(Some(footer), "span");
+        d.add_text(blog, "Blog");
+        d.set_styles(blog, &[("fontSize", "272.102px"), ("color", "rgb(255, 255, 255)")]);
+        assert_eq!(decorative_text_shape_dom(&d, blog), None);
         // Another word at the same size and opacity is not the site's name.
         let other = d.add(Some(footer), "span");
         d.add_text(other, "Tasks");
