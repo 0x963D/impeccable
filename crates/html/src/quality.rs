@@ -332,7 +332,7 @@ const FLUSH_SKIP_TAGS: &[&str] = &[
     "THEAD", "TR", "TD", "TH",
 ];
 
-const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
+const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"btn\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
 const EXEMPT_CONTEXT: &str = "pre, code, kbd, samp, var, svg, [aria-hidden=\"true\"], [class*=\"terminal\" i], [class*=\"console\" i], [class*=\"code\" i], [class*=\"mock\" i], [class*=\"editor\" i], [class*=\"syntax\" i], [class*=\"diff\" i]";
 const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"]";
 
@@ -363,6 +363,8 @@ fn is_in_control(el: &StaticElement<'_>) -> bool {
     }
     false
 }
+/// A class that names a button.
+const BUTTON_CLASS: &str = "[class*=\"btn\" i]";
 const FURNITURE_ELEMENTS: &str = "nav, [role=\"navigation\"], td, th, [role=\"gridcell\"], [role=\"cell\"], caption, figcaption, dt, dd, footer";
 /// Class markers of page furniture. As in the browser engine, they are not
 /// read off `html`, which holds a page's script state flags
@@ -634,8 +636,16 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 // line-height: 1.3 exactly is never flagged for hitting the floor
                 // (46.8 / 36 is 1.2999999999999998 in binary floats).
                 let shown = js::math_round(ratio * 100.0) / 100.0;
+                // Preformatted monospace text is drawn line by line (box
+                // art, a code sample), as the browser engine reads it. This
+                // cascade carries no `white-space`, so a `pre` stands for it,
+                // monospace by the browser's default unless a face is set.
+                let family = sv(style, "fontFamily");
+                let is_code_run = el.closest("pre").is_some()
+                    && (family.is_empty() || impeccable_core::checks::text_rules::is_monospace_family(family));
                 if ratio > 0.0
                     && shown < 1.3
+                    && !is_code_run
                     && !is_non_rendered_text(el, tag, Some(style))
                     && !is_visually_hidden(el, style)
                     && !is_heading_text(el)
@@ -746,8 +756,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     UI_TEXT_FLOOR_PX
                 };
                 // A 0.1px tolerance under each floor, as the browser engine.
+                let drawn_as_button = el.closest(BUTTON_CLASS).is_some();
                 if is_under_ui_text_floor(font_size, floor)
-                    && (is_interactive || is_furniture || dt_len <= 20)
+                    && (is_interactive || is_furniture || drawn_as_button || dt_len <= 20)
                 {
                     let excerpt = slice_utf16_prefix(&direct_text, 40);
                     // A label with no reading job (taste call r5-p3) and

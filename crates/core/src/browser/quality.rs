@@ -69,7 +69,10 @@ const FLUSH_SKIP_TAGS: &[&str] = &[
     "THEAD", "TR", "TD", "TH",
 ];
 
-const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
+const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"btn\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
+/// A class that names a button: the marker [`TINY_TEXT_UI_CONTEXT`] reads
+/// as UI and undersized-ui-text reads as a control's label.
+const BUTTON_CLASS: &str = "[class*=\"btn\" i]";
 const EXEMPT_CONTEXT: &str = "pre, code, kbd, samp, var, svg, [aria-hidden=\"true\"], [class*=\"terminal\" i], [class*=\"console\" i], [class*=\"code\" i], [class*=\"mock\" i], [class*=\"editor\" i], [class*=\"syntax\" i], [class*=\"diff\" i]";
 const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"]";
 
@@ -2156,7 +2159,15 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     let lines = text_line_count(bottom - text_rect.top, lh, font_size);
                     is_bold_title_leading(weight, Some(lines), clamped)
                 };
+                // Preformatted monospace text is drawn line by line, not
+                // set as prose: box-drawing art in a `<pre>` (`┌───┐`)
+                // needs its rows to touch, and a code sample keeps the
+                // leading its editor gives it. tiny-text and
+                // undersized-ui-text leave the same run alone.
+                let is_code_run = crate::checks::text_rules::is_monospace_family(&st("fontFamily"))
+                    && st("whiteSpace").starts_with("pre");
                 if wraps
+                    && !is_code_run
                     && !is_non_rendered_text(dom, el, tag)
                     && !is_visually_hidden(dom, el)
                     && !is_heading_text(dom, el)
@@ -2258,8 +2269,13 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 // Fluid type a hair under the floor (10.9688px against 11px)
                 // is not smaller text to a reader: the floor keeps a 0.1px
                 // tolerance under each value.
+                // A box whose class names a button (smartbi.ca's
+                // `span.features-demo__btn`, no role) is drawn as one, so its
+                // label is functional text at any length, and tiny-text
+                // leaves it to this rule.
+                let drawn_as_button = matches_or_closest(dom, el, BUTTON_CLASS);
                 if is_under_ui_text_floor(font_size, floor)
-                    && (is_interactive || is_furniture || dt_len <= 20)
+                    && (is_interactive || is_furniture || drawn_as_button || dt_len <= 20)
                 {
                     let excerpt = slice_utf16_prefix(&dt, 40);
                     // A label with no reading job (taste call r5-p3) and
@@ -5837,6 +5853,60 @@ mod tests {
         assert!(is_non_rendered_text(&d, s, "script"));
         d.set_style(s, "visibility", "collapse");
         assert!(is_non_rendered_text(&d, s, "span"));
+    }
+
+    /// observations-1004 row 14 (smartbi.ca 10048026): a 10px label in a
+    /// box whose class names a button is functional text, not body copy,
+    /// at any length. Without the class it stays tiny-text.
+    #[test]
+    fn button_class_labels_are_functional_text() {
+        let ids = |d: &FakeDom, el: ElId| -> Vec<String> {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .filter(|h| h.id == "tiny-text" || h.id == "undersized-ui-text")
+                .map(|h| format!("{}: {}", h.id, h.snippet))
+                .collect()
+        };
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let label = text_el(&mut d, body, "span", "View the full analysis", "10px");
+        d.set_rect(label, 40.0, 100.0, 140.0, 14.0);
+        assert_eq!(ids(&d, label), vec!["tiny-text: 10px body text"], "no class: body text");
+        d.set_attr(label, "class", "features-demo__btn");
+        d.add_selector(label, TINY_TEXT_UI_CONTEXT);
+        d.add_selector(label, BUTTON_CLASS);
+        assert_eq!(
+            ids(&d, label),
+            vec!["undersized-ui-text: 10px functional text \"View the full analysis\" (below 11px floor)"]
+        );
+    }
+
+    /// observations-1004 row 22 (v0-saa-s-landing-page 10047450): box art
+    /// in a monospace `pre` is drawn line by line, and its rows touch on
+    /// purpose. Prose in a proportional face, or with its white space
+    /// collapsed, keeps the finding.
+    #[test]
+    fn tight_leading_skips_preformatted_monospace_runs() {
+        const ART: &str = "  ┌───┐  │ ◉ │  └─┬─┘    │    a box drawn in characters that runs long";
+        let leading = |d: &FakeDom, el: ElId| -> usize {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .filter(|h| h.id == "tight-leading")
+                .count()
+        };
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let pre = text_el(&mut d, body, "pre", ART, "12px");
+        d.set_style(pre, "lineHeight", "15px");
+        d.set_rect(pre, 40.0, 100.0, 240.0, 75.0);
+        d.el_mut(pre).direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 240.0, 75.0));
+        assert_eq!(leading(&d, pre), 1, "no face recorded: as before");
+        d.set_styles(pre, &[("fontFamily", "ui-monospace, monospace"), ("whiteSpace", "pre")]);
+        assert_eq!(leading(&d, pre), 0, "box art in a monospace pre");
+        d.set_style(pre, "whiteSpace", "normal");
+        assert_eq!(leading(&d, pre), 1, "white space collapsed: set as prose");
+        d.set_styles(pre, &[("fontFamily", "Inter, sans-serif"), ("whiteSpace", "pre-wrap")]);
+        assert_eq!(leading(&d, pre), 1, "a proportional face");
     }
 }
 

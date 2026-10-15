@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>undersized-ui-text button-class fixture</title>
+<!--
+  observations-1004 row 14 (smartbi.ca): a span whose class names a button
+  is drawn as one, so its 10px label is functional text at any length and
+  reports here, not as 10px body text under tiny-text.
+  Explicit pixel sizes: the static engine does no layout.
+-->
+<style>
+  body { font-family: system-ui, sans-serif; font-size: 16px; }
+  .col { display: inline-block; width: 480px; vertical-align: top; }
+  .demo__btn { display: inline-block; font-size: 10px; font-weight: 700; padding: 6px 12px; border-radius: 999px; background: #ffe3d3; color: #5a2200; }
+  .demo__btn--big { display: inline-block; font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 999px; background: #ffe3d3; color: #5a2200; }
+</style>
+</head>
+<body>
+<div class="col" id="should-flag">
+  <h2>Should flag</h2>
+  <h3>A 10px label on a box drawn as a button</h3>
+  <span class="demo__btn">View the full analysis</span>
+</div>
+<div class="col" id="should-pass">
+  <h2>Should pass</h2>
+  <h3>The same label at 12px</h3>
+  <span class="demo__btn--big">View the full analysis</span>
+</div>
+</body>
+</html>
