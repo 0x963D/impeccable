@@ -1,0 +1,7 @@
+{
+  "stdout": "",
+  "stderr": "\n<REPO>/tests/fixtures/antipatterns/pulsing-dot-floats-and-bars.html\n  [pulsing-dot] .ring-dot — 8x8px dot with infinite \"ring-pulse\" animation\n    → Small pulsing status dots simulate liveness decoratively. Reserve pulse animation for indicators tied to genuinely live, changing data; a static indicator with clear labeling is honest and calmer.\n\n1 anti-pattern found.\n",
+  "exit": 2,
+  "signal": null,
+  "files": {}
+}

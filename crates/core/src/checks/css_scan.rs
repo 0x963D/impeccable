@@ -11,7 +11,7 @@ use crate::color::{
     color_to_hex, has_chroma, parse_any_color, relative_luminance, split_top_level_commas, Rgba,
 };
 
-use crate::js::{self, ci, math_min, number_to_string, parse_float, WS, WS_CHARS};
+use crate::js::{self, ci, math_max, math_min, number_to_string, parse_float, WS, WS_CHARS};
 
 use crate::js_ext_a::{
     advance_utf16, is_word_byte, last_index_of_byte, split_commas_outside_parens, split_ws,
@@ -2886,6 +2886,9 @@ re!(
     format!(r"{B}(?:w|h|size)-(?:1|1\.5|2|2\.5|3|3\.5|4){B}")
 );
 
+/// The longest side of a pulsing dot over its shortest.
+const PULSE_DOT_MAX_ASPECT: f64 = 1.5;
+
 /// JS: checks.mjs#scanCssTextForPulsingDot. `markup` defaults to `content`.
 pub fn scan_css_text_for_pulsing_dot(content: &str, markup: Option<&str>) -> Vec<PatternFinding> {
     let markup = markup.unwrap_or(content);
@@ -2944,6 +2947,11 @@ pub fn scan_css_text_for_pulsing_dot(content: &str, markup: Option<&str>) -> Vec
             _ => continue,
         };
         if w < 2.0 || h < 2.0 || w > 16.0 || h > 16.0 {
+            continue;
+        }
+        // A dot is about as wide as it is tall: a 3 by 6px bar with rounded
+        // ends (a waveform's bar) is not one, however round its radius.
+        if math_max(w, h) > PULSE_DOT_MAX_ASPECT * math_min(w, h) {
             continue;
         }
         let radius = resolve_var_refs(
@@ -3121,7 +3129,12 @@ mod tests {
     fn enclosing_selector_matches_node() {
         let cases: &[(&str, usize, Option<&str>)] = &[
             (".a { color: red }", 8, Some(".a")),
-            ("@media (x) { .b { c: d } }", 20, None),
+            // The first rule inside an at-rule block follows its brace
+            // (observations-1004 row 25: incredible.one's bounce rule).
+            ("@media (x) { .b { c: d } }", 20, Some(".b")),
+            ("@supports (x) { @media (y) {.b{c:d}} }", 32, Some(".b")),
+            ("@keyframes k { from { c: d } }", 22, None),
+            ("@keyframes k { 50% { c: d } }", 22, None),
             ("@media (x) { .b { c: d } }", 12, None),
             ("50% { c: d }", 6, None),
             ("from, to { c: d }", 12, None),
@@ -3258,6 +3271,47 @@ mod tests {
         let m =
             collect_pulse_keyframes("@keyframes n {50%{transform: translateY(2px) scale(1.2)}}");
         assert_eq!(m.entries(), &[("n".to_string(), true)]);
+    }
+
+    /// observations-1004 row 25: keyframes that move their box or change
+    /// its height are not a pulse, however they fade. A translation every
+    /// step repeats (a centred ring) still pulses.
+    #[test]
+    fn pulse_keyframes_that_move_or_resize_are_not_pulses() {
+        let pulses = |css: &str| collect_pulse_keyframes(css).entries()[0].1;
+        // imageto3d.studio's library-node-float.
+        assert!(!pulses(
+            "@keyframes f { 0% { opacity: 0.35; transform: none; } 50% { opacity: 0.55; transform: translateY(-14px); } 100% { opacity: 0.35; transform: none; } }"
+        ));
+        assert!(!pulses("@keyframes f { 0%, 100% { opacity: .4; translate: 0 0 } 50% { opacity: 1; translate: 0 -8px } }"));
+        // juskoe's wavePulse.
+        assert!(!pulses(
+            "@keyframes w { 0% { opacity: 0.4; height: 4px; } 50% { opacity: 1; height: 16px; } 100% { opacity: 0.4; height: 4px; } }"
+        ));
+        // A centred ring: the translation is the same at every step.
+        assert!(pulses(
+            "@keyframes r { 0% { transform: translate(-50%, -50%) scale(1); opacity: 1 } 100% { transform: translate(-50%,  -50%) scale(2.4); opacity: 0 } }"
+        ));
+        // One height, or one step that translates, decides nothing.
+        assert!(pulses("@keyframes h { 0%, 100% { opacity: .4; height: 8px } 50% { opacity: 1 } }"));
+        assert!(pulses("@keyframes s { 0% { opacity: 1 } 50% { opacity: .5; transform: translateY(1px) } }"));
+    }
+
+    /// observations-1004 row 25 (juskoe 10047255): a pulsing box twice as
+    /// tall as it is wide is a bar, not a dot.
+    #[test]
+    fn a_pulsing_bar_is_not_a_dot() {
+        let dots = |w: &str, h: &str| {
+            scan_css_text_for_pulsing_dot(
+                &format!(".d{{width:{w};height:{h};border-radius:9999px;animation:blip 1s infinite}} @keyframes blip{{50%{{opacity:.3}}}}"),
+                None,
+            )
+            .len()
+        };
+        assert_eq!(dots("8px", "8px"), 1);
+        assert_eq!(dots("6px", "9px"), 1, "1.5 to 1");
+        assert_eq!(dots("3px", "6px"), 0, "a waveform bar");
+        assert_eq!(dots("12px", "4px"), 0, "a pill");
     }
 
     #[test]

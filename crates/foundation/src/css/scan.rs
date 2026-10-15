@@ -130,15 +130,13 @@ pub fn enclosing_css_selector(css_text: &str, index: usize) -> Option<String> {
     let before_open = SELECTOR_COMMENT_RE.replace_all(&css_text[..open], |c: &regex::Captures| {
         " ".repeat(c[0].len())
     });
-    let prev_close = match (
-        before_open.rfind('}'),
-        before_open.rfind(';'),
-    ) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    };
+    // The selector starts after the last `}`, `;` or `{` before its block:
+    // the first rule inside `@media (...) {` or `@supports (...) {` follows
+    // the at-rule's own brace, not a declaration.
+    let prev_close = [before_open.rfind('}'), before_open.rfind(';'), before_open.rfind('{')]
+        .into_iter()
+        .flatten()
+        .max();
     let slice_start = prev_close.map(|p| p + 1).unwrap_or(0);
     let no_comments = SELECTOR_COMMENT_RE.replace_all(&css_text[slice_start..open], "");
     let raw_trim = js::trim(&no_comments);
@@ -338,6 +336,57 @@ re!(
     )
 );
 
+re!(KEYFRAME_STEP_BLOCK_RE, r"([^{};]+)\{([^{}]*)\}".to_string());
+re!(
+    TRANSLATE_FN_RE,
+    format!(r"{}(?:x|y|z|3d)?\([^)]*\)", ci("translate"))
+);
+
+/// Whether a keyframes body moves its box or changes its height, read from
+/// the steps that declare it: two steps that declare a translation (in
+/// `transform` or `translate`, `none` counting as none) and disagree on it,
+/// or two that declare different `height`s. A float (imageto3d.studio's
+/// `library-node-float`, `transform: none` to `translateY(-14px)`) and a
+/// waveform bar (juskoe's `wavePulse`, `height: 4px` to `16px`) fade as they
+/// go, but neither is a pulse. A translation every step repeats
+/// (`translate(-50%, -50%) scale(1.4)`, a centred ring) stays put, and a
+/// step that declares nothing leaves the reading as it was.
+fn keyframes_move_or_resize(body: &str) -> bool {
+    let mut translations: Vec<String> = Vec::new();
+    let mut heights: Vec<String> = Vec::new();
+    for step in KEYFRAME_STEP_BLOCK_RE.captures_iter(body) {
+        let decls = parse_css_decl_block(&step[2]);
+        let mut moved: Option<String> = None;
+        for prop in ["transform", "translate"] {
+            if let Some(v) = decls.get(prop) {
+                let v = js::to_lower_case(js::trim(v));
+                let part: Vec<String> = if prop == "translate" {
+                    if v == "none" { Vec::new() } else { vec![WS_RUN_RE.replace_all(&v, " ").into_owned()] }
+                } else {
+                    TRANSLATE_FN_RE.find_iter(&v).map(|m| WS_RUN_RE.replace_all(m.as_str(), " ").into_owned()).collect()
+                };
+                let acc = moved.get_or_insert_with(String::new);
+                for p in part {
+                    acc.push_str(&p);
+                    acc.push(';');
+                }
+            }
+        }
+        if let Some(m) = moved {
+            if !translations.contains(&m) {
+                translations.push(m);
+            }
+        }
+        if let Some(h) = decls.get("height") {
+            let h = js::to_lower_case(js::trim(h));
+            if !heights.contains(&h) {
+                heights.push(h);
+            }
+        }
+    }
+    translations.len() > 1 || heights.len() > 1
+}
+
 /// JS: checks.mjs#collectPulseKeyframes (Map name -> pulses?)
 pub fn collect_pulse_keyframes(content: &str) -> JsMap<bool> {
     let mut map: JsMap<bool> = JsMap::new();
@@ -346,9 +395,10 @@ pub fn collect_pulse_keyframes(content: &str) -> JsMap<bool> {
         let after = m.get(0).unwrap().end();
         let (i, closed) = scan_brace_block(content, after);
         let body = brace_body(content, after, i, closed);
-        let pulses = OPACITY_DECL_RE.is_match(body)
+        let pulses = (OPACITY_DECL_RE.is_match(body)
             || BOX_SHADOW_DECL_RE.is_match(body)
-            || TRANSFORM_SCALE_RE.is_match(body);
+            || TRANSFORM_SCALE_RE.is_match(body))
+            && !keyframes_move_or_resize(body);
         let name = &m[1];
         if !map.has(name) || pulses {
             map.set(name, pulses);

@@ -497,6 +497,28 @@ pub struct PatternContext {
     pub dark_page: Option<bool>,
 }
 
+static CUSTOM_PROP_DECL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(--[A-Za-z0-9_-]+)\s*:\s*$").expect("CUSTOM_PROP_DECL_RE"));
+
+/// Whether the curve at `index` is the whole value of a custom property
+/// that no `var()` in the style text reads. incredible.one defines
+/// `--ease-bounce: cubic-bezier(.34, 1.56, .64, 1)` and never uses it, so
+/// nothing on the page moves on it. A property some rule reads, or one read
+/// through another property, keeps the finding.
+fn bezier_is_unread_custom_property(style_text: &str, index: usize) -> bool {
+    let before = &style_text[..index];
+    let start = before.rfind([';', '{', '}']).map(|i| i + 1).unwrap_or(0);
+    let Some(m) = CUSTOM_PROP_DECL_RE.captures(&before[start..]) else {
+        return false;
+    };
+    let name = &m[1];
+    let reads = Regex::new(&format!(r"var\(\s*{}\s*[,)]", regex::escape(name)));
+    match reads {
+        Ok(re) => !re.is_match(style_text),
+        Err(_) => false,
+    }
+}
+
 /// JS: checks.mjs#checkHtmlPatterns. `corpora` defaults to
 /// `buildHtmlPatternCorpora(html)`. Findings' `index` fields are byte
 /// offsets into `corpora.style_text`.
@@ -662,6 +684,9 @@ pub fn check_html_patterns_with(
         let y1 = parse_float(&bm[2]);
         let y2 = parse_float(&bm[4]);
         if y1 < -0.1 || y1 > 1.1 || y2 < -0.1 || y2 > 1.1 {
+            if bezier_is_unread_custom_property(style_text, bm.get(0).unwrap().start()) {
+                continue;
+            }
             findings.push(pf(
                 "bounce-easing",
                 format!(
@@ -1009,5 +1034,45 @@ mod tests {
 @keyframes sk-bounceDelay{0%,100%{transform:scale(0)}50%{transform:scale(1)}}\
 @keyframes sk-bounceDelay2{0%,100%{opacity:0}50%{opacity:1}}";
         assert!(bounce(pulses).is_empty());
+    }
+
+    /// observations-1004 row 25 (incredible.one 10048475): a bounce curve
+    /// that is only the value of a custom property no `var()` reads moves
+    /// nothing. Read by a rule, or written into a transition directly, it
+    /// reports; an unread curve does not hide a used one after it.
+    #[test]
+    fn an_unread_custom_property_curve_is_not_a_bounce() {
+        let bounce = |css: &str| -> Vec<String> {
+            check_html_patterns(&format!("<style>{css}</style>"), None)
+                .into_iter()
+                .filter(|f| f.id == "bounce-easing")
+                .map(|f| f.snippet)
+                .collect()
+        };
+        let defined = ":root{--ease-bounce: cubic-bezier(.34, 1.56, .64, 1); --ease-out: ease-out}";
+        assert!(bounce(defined).is_empty(), "defined, never read");
+        assert_eq!(
+            bounce(&format!("{defined} .pop{{transition: transform .3s var(--ease-bounce)}}")),
+            vec!["cubic-bezier(.34, 1.56, .64, 1)".to_string()],
+            "read by a rule"
+        );
+        assert_eq!(
+            bounce(&format!("{defined} .pop{{transition: transform .3s var( --ease-bounce , ease)}}")),
+            vec!["cubic-bezier(.34, 1.56, .64, 1)".to_string()],
+            "read with a fallback"
+        );
+        assert_eq!(
+            bounce(&format!("{defined} .pop{{transition: transform .3s cubic-bezier(.2, 1.4, .4, 1)}}")),
+            vec!["cubic-bezier(.2, 1.4, .4, 1)".to_string()],
+            "a used curve after an unread one"
+        );
+        assert_eq!(
+            bounce(".pop{transition: transform .3s cubic-bezier(.34, 1.56, .64, 1)}"),
+            vec!["cubic-bezier(.34, 1.56, .64, 1)".to_string()],
+            "written directly"
+        );
+        // A property whose name only starts like the defined one does not
+        // read it.
+        assert!(bounce(&format!("{defined} .pop{{transition: transform .3s var(--ease-bounce-soft)}}")).is_empty());
     }
 }
