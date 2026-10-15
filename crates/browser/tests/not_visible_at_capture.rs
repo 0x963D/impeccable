@@ -80,6 +80,8 @@ fn text_a_visitor_cannot_see_at_capture_is_not_scored() {
     for want in [
         ("text-occlusion", "#flag-curtain-link"),
         ("text-occlusion", "#flag-pe-label"),
+        ("text-occlusion", "#flag-buried-header-link"),
+        ("low-contrast", "#flag-placed-below"),
         ("body-text-viewport-edge", "#flag-sticky-copy"),
         ("undersized-ui-text", "#flag-2px-link"),
         ("low-contrast", "#flag-frame-badge"),

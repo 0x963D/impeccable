@@ -9,14 +9,16 @@
 
        Should pass, each beside a should-flag twin that differs in the one
        fact the engine reads:
-       - a curtain footer: a fixed layer at z-index 0 that a page block at
-         z-index 1 with an opaque fill covers wherever a probe asks
-         (text-occlusion). Twin: the same layer with a link the page leaves
-         showing, so the layer is on screen and the covered link collides;
+       - a curtain footer: a sticky layer anchored to the window's bottom at
+         z-index 0 that a page block at z-index 1 with an opaque fill covers
+         wherever a probe asks (text-occlusion). Twins: the same layer with a
+         link the page leaves showing, so the layer is on screen and the
+         covered link collides; and a layer pinned to the top at z-index 0
+         that the page buries for good, which is a collision too;
        - a label in a pointer-events: none panel over an SVG drawing, where
          the probe passes through to the drawing (text-occlusion). Twin: the
          same panel over SVG text, which overlaps whichever is on top;
-       - consent copy at the window's left edge in a fixed bar
+       - consent copy 12px from the window's left edge in a fixed bar
          (body-text-viewport-edge). Twin: the same copy in a sticky bar;
        - a link set at 1px (undersized-ui-text). Twin: the same link at 2px;
        - small numbered labels in a block at display: none beside headings
@@ -24,7 +26,8 @@
        - a marker badge placed below a map that hides its overflow and holds
          its markers absolutely placed (low-contrast). Twin: the same badge
          below a frame whose in-flow content runs past it, which is how a
-         smooth-scroll library holds its page;
+         smooth-scroll library holds its page, and faint copy below the fold
+         of a frame whose content sits in a placed wrapper at inset 0;
        - faint placeholder copy below the fold under an opaque card that a
          later positioned button lays over it (low-contrast). Twin: the same
          card in a static button, whose fill paints under the poster.
@@ -39,14 +42,19 @@
        by crates/browser/tests/not_visible_at_capture.rs. */
 
     * { box-sizing: border-box; }
-    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: #111; background: #fff; height: 4200px; position: relative; }
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: #111; background: #fff; height: 5300px; position: relative; }
     h2.case-title { position: absolute; margin: 0; font: 600 13px/17px system-ui; color: #333; }
 
     /* Curtain layers, fixed at z-index 0, under page blocks at z-index 1. */
-    .curtain { position: fixed; top: 420px; height: 100px; z-index: 0; background: #2b46f9; }
+    .curtain { position: sticky; bottom: 280px; height: 100px; z-index: 0; background: #2b46f9; }
+    .curtain-spacer { height: 5000px; }
+    .curtain-top { position: fixed; top: 580px; bottom: auto; left: 640px; width: 600px; height: 60px; z-index: 0; background: #2b46f9; }
+    .curtain-top a { position: absolute; top: 20px; left: 20px; font: 16px/20px system-ui; color: #ffffff; white-space: nowrap; }
+    .page-c { position: absolute; top: 570px; left: 640px; width: 300px; height: 80px; z-index: 1; background: #0a0b10; }
+    .page-c h3 { position: absolute; top: 20px; left: 20px; margin: 0; font: 600 24px/40px system-ui; color: #f5f5f2; white-space: nowrap; }
     .curtain a { position: absolute; top: 30px; font: 16px/20px system-ui; color: #ffffff; white-space: nowrap; }
-    .curtain-a { left: 20px; width: 560px; }
-    .curtain-b { left: 640px; width: 600px; }
+    .curtain-a { margin-left: 20px; width: 560px; }
+    .curtain-b { margin-left: 640px; width: 600px; }
     .page-block { position: absolute; top: 400px; height: 140px; z-index: 1; background: #0a0b10; }
     .page-block h3 { position: absolute; top: 40px; left: 20px; margin: 0; font: 600 24px/40px system-ui; color: #f5f5f2; white-space: nowrap; }
     .page-a { left: 20px; width: 560px; }
@@ -66,7 +74,7 @@
 
     /* A consent bar fixed at the bottom of the window. */
     .consent { position: fixed; left: 0; bottom: 0; width: 100%; height: 72px; background: #222; z-index: 5; }
-    .consent p, .sticky-bar p { margin: 0; padding: 12px 0; font: 12px/16px system-ui; color: #ffffff; }
+    .consent p, .sticky-bar p { margin: 0; padding: 12px 0 12px 12px; font: 12px/16px system-ui; color: #ffffff; }
     .sticky-bar { position: sticky; top: 0; width: 100%; background: #333; }
     .sticky-wrap { position: absolute; top: 3700px; left: 0; width: 100%; height: 400px; }
 
@@ -85,6 +93,10 @@
     .frame { left: 640px; }
     .map-canvas { position: static; height: 0; }
     .frame-content { height: 1700px; }
+    .placed-frame { position: absolute; top: 4300px; left: 640px; width: 600px; height: 800px; overflow: hidden; background: #ffffff; }
+    .placed-inner { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+    .placed-content { height: 2100px; padding-top: 900px; }
+    .placed-content p { margin: 0; font: 14px/20px system-ui; color: #bbbbbb; }
     .marker { position: absolute; width: 20px; height: 20px; border-radius: 50%; font: 700 12px/20px system-ui; text-align: center; color: #ffffff; }
     .marker-a { left: 200px; top: 900px; background: #f9561f; }
     .marker-b { left: 200px; top: 900px; background: #f85a20; }
@@ -126,14 +138,11 @@
     <a id="flag-2px-link" href="#bluesky" style="font-size: 2px;">Die LUH auf Bluesky</a>
   </div>
 
-  <!-- Curtain layers. -->
-  <div class="curtain curtain-a"><a id="pass-curtain-link" href="#privacy" style="left: 20px;">Privacy policy</a></div>
+  <!-- Page blocks over the curtain layers, which close the page below. -->
   <div class="page-block page-a"><h3>Watch the agent catch it</h3></div>
-  <div class="curtain curtain-b">
-    <a id="flag-curtain-link" href="#terms" style="left: 20px;">Terms of service</a>
-    <a class="seen" href="#contact" style="left: 420px;">Contact us</a>
-  </div>
   <div class="page-block page-b"><h3>Every regression</h3></div>
+  <div class="curtain-top"><a id="flag-buried-header-link" href="#home">Home page</a></div>
+  <div class="page-c"><h3>Meet the agent</h3></div>
 
   <!-- Numbered labels: hidden, then shown. -->
   <div class="steps steps-hidden">
@@ -159,6 +168,9 @@
     </div>
   </div>
 
+  <!-- A smooth-scroll frame whose content sits in a placed wrapper. -->
+  <div class="placed-frame"><div class="placed-inner"><div class="placed-content"><p id="flag-placed-below">Selected case studies from the last year</p></div></div></div>
+
   <!-- Demo frames below the fold. -->
   <div class="demo demo-a">
     <div class="poster"><div class="chat-row"><p id="pass-covered-placeholder">Reply to the agent</p></div></div>
@@ -172,6 +184,15 @@
   <!-- A sticky bar far down the page. -->
   <div class="sticky-wrap">
     <div class="sticky-bar"><p id="flag-sticky-copy">We use cookies to measure how this site is used and to improve it for every visitor.</p></div>
+  </div>
+
+  <!-- Curtain layers: sticky to the window's bottom at z-index 0, after the
+       page's flow, so they sit under the page blocks above. -->
+  <div class="curtain-spacer"></div>
+  <div class="curtain curtain-a"><a id="pass-curtain-link" href="#privacy" style="left: 20px;">Privacy policy</a></div>
+  <div class="curtain curtain-b">
+    <a id="flag-curtain-link" href="#terms" style="left: 20px;">Terms of service</a>
+    <a class="seen" href="#contact" style="left: 420px;">Contact us</a>
   </div>
 
   <!-- A consent bar fixed to the bottom of the window. -->
