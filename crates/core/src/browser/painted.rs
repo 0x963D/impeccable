@@ -71,7 +71,7 @@ pub enum Unpainted {
     /// The box has no width or no height, and none of its content shows past
     /// that edge.
     NoArea,
-    /// A text measurement's text is set at a font size under 1px, and no
+    /// A text measurement's text is set at a font size of 1px or less, and no
     /// descendant sets it larger: a Slick dot's `font-size: 0` label, a link
     /// laid over a card whose words only a screen reader reads.
     NoFontSize,
@@ -724,26 +724,29 @@ fn no_text(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
 /// the resource fails to load, which a capture does not record.
 const FALLBACK_HOST_TAGS: &[&str] = &["audio", "canvas", "iframe", "video"];
 
-/// A text measurement whose text is set under 1px: the element's computed
-/// font size parses below 1px, and no descendant that carries text of its own
-/// sets a size of 1px or more (the gap-collapsing `font-size: 0` on a row of
-/// inline blocks, whose children set their own). A size that does not parse
-/// keeps the finding. The subtree is read only once the element's own size
-/// is under 1px.
+/// A text measurement whose text is set at 1px or less: the element's
+/// computed font size parses to 1px or under, and no descendant that carries
+/// text of its own sets a larger size (the gap-collapsing `font-size: 0` on a
+/// row of inline blocks, whose children set their own). A glyph a pixel tall
+/// is a dot, not a letter: uni-hannover.de hides a "Die LUH auf Mastodon"
+/// link with an inline `font-size: 1px` in a static 9x1 box that no clip
+/// removes. A size that does not parse keeps the finding. The subtree is read
+/// only once the element's own size is that small.
 fn no_font_size(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
-    if !under_1px(&dom.style(el, "fontSize")) {
+    if !at_most_1px(&dom.style(el, "fontSize")) {
         return None;
     }
     let sized_text = dom.query_all(Some(el), "*").unwrap_or_default().into_iter().any(|d| {
-        has_direct_text_longer_than(dom, d, 0) && !under_1px(&dom.style(d, "fontSize"))
+        has_direct_text_longer_than(dom, d, 0) && !at_most_1px(&dom.style(d, "fontSize"))
     });
     (!sized_text).then_some(Unpainted::NoFontSize)
 }
 
-/// A computed `font-size` that parses to a size under 1px.
-pub fn under_1px(font_size: &str) -> bool {
+/// A computed `font-size` that parses to 1px or less: a size no glyph can be
+/// read at.
+pub fn at_most_1px(font_size: &str) -> bool {
     let n = js::parse_float(font_size);
-    n.is_finite() && n < 1.0
+    n.is_finite() && n <= 1.0
 }
 
 /// Whether `node` is a face turned away under `backface-visibility: hidden`:
@@ -2423,7 +2426,7 @@ mod tests {
 
     /// jyes.com.tw's Slick dots: the label of each dot is `font-size: 0`.
     #[test]
-    fn text_set_under_1px_is_not_painted_for_text_rules() {
+    fn text_set_at_1px_or_less_is_not_painted_for_text_rules() {
         let (mut d, body) = page();
         let dot = d.add(Some(body), "button");
         d.set_style(dot, "fontSize", "0px");
@@ -2449,9 +2452,22 @@ mod tests {
         // A size that does not parse keeps the text.
         d.set_style(dot, "fontSize", "");
         assert_eq!(text(&d, dot), None);
-        assert!(under_1px("0.5px"));
-        assert!(!under_1px("1px"));
-        assert!(!under_1px(""));
+        assert!(at_most_1px("0.5px"));
+        assert!(!at_most_1px(""));
+
+        // uni-hannover.de (10046522): a link hidden with an inline
+        // `font-size: 1px` in a static 9x1 box nothing clips. Its should-flag
+        // twin is the same link at 2px, which still paints marks.
+        let hidden = d.add(Some(body), "a");
+        d.set_style(hidden, "fontSize", "1px");
+        d.set_rect(hidden, 76.0, 5895.0, 9.0, 1.0);
+        d.add_text(hidden, "Die LUH auf Mastodon");
+        assert_eq!(text(&d, hidden), Some(Unpainted::NoFontSize));
+        assert!(at_most_1px("1px"));
+        d.set_style(hidden, "fontSize", "2px");
+        d.set_rect(hidden, 76.0, 5895.0, 18.0, 2.0);
+        assert_eq!(text(&d, hidden), None);
+        assert!(!at_most_1px("1.5px"));
     }
 
     /// stroq.dev's "your browser does not support video" line inside the

@@ -4037,7 +4037,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                 continue;
             }
             let top_own_text = !element_direct_text(dom, top).is_empty()
-                && !super::painted::under_1px(&dom.style(top, "fontSize"))
+                && !super::painted::at_most_1px(&dom.style(top, "fontSize"))
                 && glyphs_may_cover(top_glyphs, victim_glyphs.as_ref(), x, y);
             let top_in_svg = closest_or_none(dom, top, "svg").is_some();
             let top_has_text = top_own_text || top_in_svg;
