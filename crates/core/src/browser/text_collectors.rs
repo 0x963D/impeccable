@@ -396,6 +396,13 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
             heading_text: strip_edge_quotes_slice(&heading_text, 60),
         });
     }
+    // `#` labels that all carry the same word after the number ("#1 Rated",
+    // "#2 Rated", "#3 Rated") are a ranked list, not named sections.
+    let hash_words: Vec<Option<String>> =
+        candidates.iter().filter(|c| c.label_text.starts_with('#')).map(|c| hash_label_word(&c.label_text)).collect();
+    if hash_words.len() >= 2 && hash_words[0].is_some() && hash_words.iter().all(|w| *w == hash_words[0]) {
+        candidates.retain(|c| !c.label_text.starts_with('#'));
+    }
     candidates
 }
 
@@ -404,6 +411,23 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
 /// two digits right after the `#`, then nothing or a space and a word.
 static HASH_LABEL_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^#([0-9]{1,2})(?: [^ ].*)?$").expect("HASH_LABEL_RE"));
+
+/// Words that make a `#` label a rank ("#1 Rated", "#2 Best seller"), not a
+/// section number.
+const RANKING_WORDS: &[&str] = &[
+    "rated", "ranked", "rank", "best", "top", "in", "pick", "choice", "overall", "seller", "bestseller",
+    "selling", "voted", "place", "trending",
+];
+
+/// The first word after the number of a `#` label, lowercased: "#1 Connect"
+/// reads "connect", a bare "#03" reads none.
+fn hash_label_word(text: &str) -> Option<String> {
+    let rest = text.strip_prefix('#')?.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.split_whitespace()
+        .next()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|w| !w.is_empty())
+}
 
 /// [`parse_numbered_label_text`] for a label with a leading `#`, which the
 /// shared parser (pinned by the frozen vectors) reads as no number. The text
@@ -414,22 +438,41 @@ fn parse_hash_numbered_label(raw: &str) -> Option<NumberedLabel> {
     if utf16_len(&text) > 40 {
         return None;
     }
+    if hash_label_word(&text).is_some_and(|w| RANKING_WORDS.contains(&w.as_str())) {
+        return None;
+    }
     let index = parse_int(&HASH_LABEL_RE.captures(&text)?[1], 10);
     (index.is_finite() && index <= 40.0).then_some(NumberedLabel { index, text })
 }
 
+/// How many wrappers past an article the drawn-box walk climbs: a card
+/// component that draws the card on a `div` around the semantic article.
+const ARTICLE_WRAPPER_LEVELS: usize = 3;
+
+/// The card contexts that hold an article and keep it a card whatever
+/// either paints: a link, a button, a list item.
+const ARTICLE_HOLDER_SELECTOR: &str = "a,button,li,[role=\"listitem\"],[role=\"option\"]";
+
 /// Whether the card context that holds a numbered label and its heading is
-/// an `article` nothing draws as a box: no box from the heading's parent up
-/// to and including the article that also holds the label is drawn
-/// ([`draws_a_box`]). nousresearch.com wraps each feature in a bare
-/// `article.landing-feature`, its "#1 Connect" label over a 46px h3 on the
-/// section's own grey, which is a section, not a card. A list item, link or
-/// button stays a card context whatever it paints.
+/// an `article` nothing draws as a box. nousresearch.com wraps each feature
+/// in a bare `article.landing-feature`, its "#1 Connect" label over a 46px
+/// h3 on the section's own grey, which is a section, not a card.
+///
+/// The article is a card when a link, button or list item holds it, or when
+/// a box that also holds the label is drawn ([`draws_a_box`]): from the
+/// heading's parent up to the article, then up to
+/// [`ARTICLE_WRAPPER_LEVELS`] wrappers past it whose only element child is
+/// the box below (a card component drawn on a `div` or `a` around the
+/// article). The walk stops at a box that holds anything else, the grid or
+/// section the cards sit in.
 fn in_an_unpainted_article(dom: &dyn Dom, heading: ElId, label: ElId) -> bool {
     let Ok(Some(item)) = dom.closest(heading, KICKER_CARD_CONTEXT_SELECTOR) else {
         return false;
     };
     if tag_lower(dom, item) != "article" {
+        return false;
+    }
+    if dom.parent(item).is_some_and(|p| super::dom::closest_or_none(dom, p, ARTICLE_HOLDER_SELECTOR).is_some()) {
         return false;
     }
     let mut cur = dom.parent(heading);
@@ -438,9 +481,21 @@ fn in_an_unpainted_article(dom: &dyn Dom, heading: ElId, label: ElId) -> bool {
             return false;
         }
         if c == item {
-            return true;
+            break;
         }
         cur = dom.parent(c);
+    }
+    let body = dom.body();
+    let mut below = item;
+    for _ in 0..ARTICLE_WRAPPER_LEVELS {
+        let Some(up) = dom.parent(below) else { break };
+        if Some(up) == body || dom.children(up).as_slice() != [below] {
+            break;
+        }
+        if draws_a_box(dom, up) {
+            return false;
+        }
+        below = up;
     }
     true
 }
@@ -459,17 +514,7 @@ fn draws_a_box(dom: &dyn Dom, el: ElId) -> bool {
     }) {
         return true;
     }
-    let drawn = ["Top", "Right", "Bottom", "Left"]
-        .iter()
-        .filter(|s| {
-            let style = dom.style(el, &format!("border{s}Style"));
-            parse_float(&dom.style(el, &format!("border{s}Width"))) > 0.0
-                && style != "none"
-                && style != "hidden"
-                && !crate::checks::measures::css_color_is_transparent(Some(&dom.style(el, &format!("border{s}Color"))))
-        })
-        .count();
-    drawn >= 3
+    super::element_checks::drawn_border_sides(dom, el) >= 3
 }
 
 /// The media that make a numbered label a picture rather than a section
@@ -1069,6 +1114,59 @@ mod tests {
         assert_eq!(build(false, ["#01", "#02"]).len(), 2, "a bare hash index");
         assert!(build(false, ["#1Connect", "#2Remember"]).is_empty(), "no space after the number");
         assert!(build(false, ["#123 Connect", "#124 Remember"]).is_empty(), "three digits");
+    }
+
+    /// Review of round 11: a card drawn outside the article (a link or a
+    /// `div` card component around it) keeps the card exemption, and a
+    /// ranked list of `#` labels is not section numbering.
+    #[test]
+    fn numbered_labels_keep_cards_drawn_around_the_article_and_skip_ranks() {
+        let build = |wrapper: Option<&str>, texts: [&str; 3]| {
+            let mut d = FakeDom::new();
+            let (_html, body) = d.with_page();
+            d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+            let grid = d.add(Some(body), "div");
+            for (i, text) in texts.iter().enumerate() {
+                let parent = match wrapper {
+                    Some(tag) => {
+                        let w = d.add(Some(grid), tag);
+                        d.set_styles(
+                            w,
+                            &[
+                                ("boxShadow", "rgba(0, 0, 0, 0.12) 0px 2px 8px 0px"),
+                                ("borderRadius", "16px"),
+                                ("backgroundColor", "rgb(243, 239, 230)"),
+                            ],
+                        );
+                        w
+                    }
+                    None => grid,
+                };
+                let article = d.add(Some(parent), "article");
+                d.set_rect(article, 24.0 + i as f64 * 360.0, 100.0, 330.0, 300.0);
+                let label = d.add(Some(article), "span");
+                d.add_text(label, text);
+                d.set_styles(
+                    label,
+                    &[
+                        ("fontSize", "11px"),
+                        ("textTransform", "uppercase"),
+                        ("fontFamily", "monospace"),
+                        ("color", "rgb(102, 102, 102)"),
+                    ],
+                );
+                let h = d.add(Some(article), "h3");
+                d.add_text(h, &format!("Step {}", i + 1));
+                d.set_style(h, "fontSize", "28px");
+            }
+            check_numbered_section_labels_dom(&d).len()
+        };
+        assert_eq!(build(None, ["01", "02", "03"]), 3, "bare articles");
+        assert_eq!(build(Some("a"), ["01", "02", "03"]), 0, "a link around each article");
+        assert_eq!(build(Some("div"), ["#1", "#2", "#3"]), 0, "a drawn div around each article");
+        assert_eq!(build(None, ["#1 Rated", "#2 Rated", "#3 Rated"]), 0, "a ranking word");
+        assert_eq!(build(None, ["#1 Fast", "#2 Fast", "#3 Fast"]), 0, "one word repeated");
+        assert_eq!(build(None, ["#1 Plan", "#2 Build", "#3 Ship"]), 3, "named sections");
     }
 
     /// gig-connect-six.vercel.app: a capacity badge, a people icon and a

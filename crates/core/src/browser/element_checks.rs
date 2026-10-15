@@ -4431,7 +4431,9 @@ const PAINTED_SPILL_MIN_PX: f64 = 2.0;
 /// a 12.8px uppercase label 46px past its content box: it uses up the 40px
 /// right padding and ends 5.7px outside the button, where its last letter
 /// is white on the near-white section. `scrollWidth` measures the padding
-/// box, so that spill reads 7px and the scroll test passes it over.
+/// box, so that spill reads 7px and the scroll test passes it over. It is
+/// read only where the scroll test did not fire: a spill that test measures
+/// into free space stays quiet whatever the box paints (r4-p19).
 ///
 /// Only a box a reader can see the edge of counts: a fill that differs from
 /// the surface under it, a background image, or a drawn border. A box that
@@ -4508,16 +4510,25 @@ fn spill_past_painted_box(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<f64> {
     Some(past_border)
 }
 
-/// Whether `el` draws a border a reader sees on any side: a width over 0, a
-/// style that draws, and a colour that is not transparent.
+/// Whether `el` draws a border a reader sees on any side
+/// ([`drawn_border_sides`]).
 fn draws_a_border(dom: &dyn Dom, el: ElId) -> bool {
-    ["Top", "Right", "Bottom", "Left"].iter().any(|s| {
-        let style = dom.style(el, &format!("border{s}Style"));
-        style_px(dom, el, &format!("border{s}Width")) > 0.0
-            && style != "none"
-            && style != "hidden"
-            && !measures::css_color_is_transparent(Some(&dom.style(el, &format!("border{s}Color"))))
-    })
+    drawn_border_sides(dom, el) > 0
+}
+
+/// How many sides of `el` draw a border a reader sees: a width over 0, a
+/// style that draws, and a colour that is not transparent.
+pub(crate) fn drawn_border_sides(dom: &dyn Dom, el: ElId) -> usize {
+    ["Top", "Right", "Bottom", "Left"]
+        .iter()
+        .filter(|s| {
+            let style = dom.style(el, &format!("border{s}Style"));
+            style_px(dom, el, &format!("border{s}Width")) > 0.0
+                && style != "none"
+                && style != "hidden"
+                && !measures::css_color_is_transparent(Some(&dom.style(el, &format!("border{s}Color"))))
+        })
+        .count()
 }
 
 /// How close, in ems of the spilling text, a spill has to come to another
@@ -4548,9 +4559,24 @@ fn spill_does_harm(dom: &dyn Dom, el: ElId, box_: (f64, f64), reach: (f64, f64))
         }
     };
     let tolerance = font_size * SPILL_MEETS_EM;
+    // Code is often clipped on purpose: a terminal window in a hero, an
+    // excerpt cut at a fixed height. A clip around code ends the spill
+    // where its author meant it to, and only code that reaches the
+    // viewport edge (or widens the page past it) or runs into another box
+    // is a spill a reader trips on.
+    if is_code_text(dom, el) {
+        return !spill_is_clipped(dom, el, reach)
+            && (spill_reaches_viewport_edge(dom, (spills_left, spills_right), reach, tolerance)
+                || spill_meets_another_box(dom, el, box_, reach, (spills_left, spills_right), tolerance));
+    }
     spill_is_clipped(dom, el, reach)
         || spill_reaches_viewport_edge(dom, (spills_left, spills_right), reach, tolerance)
         || spill_meets_another_box(dom, el, box_, reach, (spills_left, spills_right), tolerance)
+}
+
+/// Whether `el` is, or sits in, a `pre` or `code` element.
+fn is_code_text(dom: &dyn Dom, el: ElId) -> bool {
+    closest_or_none(dom, el, "pre, code").is_some()
 }
 
 /// Whether a box that hides or clips x overflow, `el` itself or an ancestor
@@ -4803,18 +4829,17 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
             return Vec::new();
         };
         let content_left = rect.left + dom.client_left(el);
-        if spill_does_harm(dom, el, (content_left, content_left + client_width), reach) {
-            return vec![RuleHit::new(
-                "text-overflow",
-                format!(
-                    "{} overflows its box by {}px",
-                    class_selector(dom, el),
-                    round_str(delta)
-                ),
-            )];
+        if !spill_does_harm(dom, el, (content_left, content_left + client_width), reach) {
+            return Vec::new();
         }
-        // A spill into free space still leaves a box that paints its edge,
-        // which the test below reads.
+        return vec![RuleHit::new(
+            "text-overflow",
+            format!(
+                "{} overflows its box by {}px",
+                class_selector(dom, el),
+                round_str(delta)
+            ),
+        )];
     }
     if client_width > 0.0 {
         if let Some(spill) = spill_past_painted_box(dom, el, &rect) {
@@ -8459,10 +8484,54 @@ mod tests {
         assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 0, "inside the border box both sides");
         d.set_text_rect(btn, 9.0, 4170.3, 372.0, 16.0);
         assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 1, "6px out of both sides");
+        // A spill the scroll test measures (16px or more past the padding
+        // box) into free space stays quiet whatever the box paints (r4-p19):
+        // a bordered nowrap chip, a highlighter heading.
+        let mut d = build(430.0, "rgb(86, 177, 70)");
+        d.el_mut(btn).scroll_width = 470.0;
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "a free-space spill the scroll test reads");
         // Trailing tracking ends the rect past the last glyph.
         let mut d = build(324.66, "rgb(86, 177, 70)");
         d.set_style(btn, "letterSpacing", "4px");
         assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "the overshoot is a letter space");
+    }
+
+    /// Review of round 11: code clipped on purpose (a terminal window in a
+    /// hero, an excerpt cut at a fixed height) is not a spill; code that
+    /// reaches the viewport edge (w3c.github.io's unwrapped samples on a
+    /// phone) is.
+    #[test]
+    fn text_overflow_reads_code_only_where_it_reaches_the_edge_or_a_box() {
+        let build = |clip: bool, line_width: f64| {
+            let (mut d, body) = page();
+            d.inner_width = 1280.0;
+            let win = d.add(Some(body), "div");
+            visible(&mut d, win);
+            d.set_rect(win, 700.0, 100.0, 460.0, 232.0);
+            d.el_mut(win).client_width = 460.0;
+            d.set_styles(
+                win,
+                &[
+                    ("overflowX", if clip { "hidden" } else { "visible" }),
+                    ("overflow", if clip { "hidden" } else { "visible" }),
+                    ("backgroundColor", "rgb(11, 11, 15)"),
+                ],
+            );
+            let pre = d.add(Some(win), "pre");
+            visible(&mut d, pre);
+            d.set_rect(pre, 716.0, 148.0, 428.0, 80.0);
+            d.el_mut(pre).client_width = 428.0;
+            d.set_styles(pre, &[("whiteSpace", "pre"), ("overflowX", "visible"), ("overflow", "visible")]);
+            let code = d.add(Some(pre), "code");
+            d.add_text(code, "$ acme deploy --project my-really-long-project-identifier --region us-east-1");
+            d.set_styles(code, &[("display", "inline"), ("position", "static"), ("fontSize", "13px"), ("opacity", "1"), ("visibility", "visible")]);
+            d.set_rect(code, 716.0, 148.0, line_width, 80.0);
+            d.set_text_rect(code, 716.0, 148.0, line_width, 80.0);
+            check_element_text_overflow_dom(&d, code).len()
+        };
+        assert_eq!(build(true, 689.0), 0, "a terminal window clips its code");
+        assert_eq!(build(false, 689.0), 1, "the same line runs off the viewport");
+        assert_eq!(build(false, 300.0), 0, "a line that fits");
     }
 
     /// lockheedmartin.com 10046719: a section heading types itself out, its

@@ -316,6 +316,10 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "pass-pre-scroll",
             "pass-typing-opening",
             "pass-label-in-padding",
+            "pass-terminal-code",
+            "pass-excerpt-code",
+            "pass-chip-free-space",
+            "pass-highlighter-free-space",
         ],
         "text-overflow",
     );

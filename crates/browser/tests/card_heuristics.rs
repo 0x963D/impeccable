@@ -327,6 +327,6 @@ fn label_collectors_climb_and_scale() {
         &findings,
         "numbered-section-labels",
         &["Alpha ships first", "Instant deployment", "Omega grows larger", "Xi connects", "Omicron remembers"],
-        &["Nu sits too close in size", "Epsilon reads large", "Lambda sits in a card", "Pi keeps its card"],
+        &["Nu sits too close in size", "Epsilon reads large", "Lambda sits in a card", "Pi keeps its card", "Rho sits in a linked card", "Sigma sits in a drawn wrapper", "Tau ranks first", "Upsilon ranks second"],
     );
 }
