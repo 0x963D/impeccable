@@ -25,6 +25,10 @@ pub fn write_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> std::io::Result<()>
         .unwrap_or(0);
     let temp = dir.join(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
     let result = (|| {
+        // A dangling link can point into a directory that does not exist yet
+        // (a first-time dotfiles checkout); callers only create the link's own
+        // parent.
+        std::fs::create_dir_all(&dir)?;
         std::fs::write(&temp, bytes)?;
         if let Ok(meta) = std::fs::metadata(&target) {
             let _ = std::fs::set_permissions(&temp, meta.permissions());
@@ -128,6 +132,19 @@ mod tests {
         assert!(std::fs::symlink_metadata(&hop).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_to_string(d.join("dotfiles/real.json")).unwrap(), "new");
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_the_missing_directory_of_a_dangling_link() {
+        let d = tmp("dangling-dir");
+        let link = d.join("settings.json");
+        // `settings.json -> dotfiles/claude/settings.json`, with `dotfiles/claude/` not created yet.
+        std::os::unix::fs::symlink("dotfiles/claude/settings.json", &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(d.join("dotfiles/claude/settings.json")).unwrap(), "new");
         let _ = std::fs::remove_dir_all(&d);
     }
 

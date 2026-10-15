@@ -2341,7 +2341,8 @@ fn admin_on_repairs_project_manifest_from_user_scope_claude_skill() {
     let t = Tmp::new();
     let cwd = t.path();
     let home = t.0.join("home");
-    std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable/scripts")).unwrap();
+    std::fs::write(home.join(".claude/skills/impeccable/scripts/impeccable"), "#!/bin/sh\n").unwrap();
     std::fs::write(home.join(".claude/settings.json"), r#"{"model":"claude-sonnet-5"}"#).unwrap();
     t.write(
         ".claude/settings.local.json",
@@ -2375,7 +2376,8 @@ fn admin_on_repairs_shared_project_manifest_from_user_scope_claude_skill() {
     let t = Tmp::new();
     let cwd = t.path();
     let home = t.0.join("home");
-    std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable/scripts")).unwrap();
+    std::fs::write(home.join(".claude/skills/impeccable/scripts/impeccable"), "#!/bin/sh\n").unwrap();
     let shared_original = r#"{"model":"claude-sonnet-5","hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"node \"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/hook.mjs\""}]}]}}"#;
     t.write(".claude/settings.json", shared_original);
     t.write(
@@ -2406,7 +2408,8 @@ fn admin_on_user_scope_repair_leaves_committed_settings_byte_unchanged() {
     let t = Tmp::new();
     let cwd = t.path();
     let home = t.0.join("home");
-    std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable/scripts")).unwrap();
+    std::fs::write(home.join(".claude/skills/impeccable/scripts/impeccable"), "#!/bin/sh\n").unwrap();
     let shared_original = "{\n  \"hooks\": {\"PostToolUse\": [{\"matcher\": \"Edit\", \"hooks\": [{\"type\": \"command\", \"command\": \"\\\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\\\" hook\"}]}]}\n}\n";
     t.write(".claude/settings.json", shared_original);
     let home_text = home.to_string_lossy().to_string();
@@ -2428,7 +2431,8 @@ fn admin_on_user_scope_keeps_project_hook_when_user_settings_are_invalid() {
     let t = Tmp::new();
     let cwd = t.path();
     let home = t.0.join("home");
-    std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable/scripts")).unwrap();
+    std::fs::write(home.join(".claude/skills/impeccable/scripts/impeccable"), "#!/bin/sh\n").unwrap();
     let broken = "{ \"model\": \"claude-sonnet-5\",, }";
     std::fs::write(home.join(".claude/settings.json"), broken).unwrap();
     let local_original = r#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\" hook"}]}]}}"#;
@@ -2443,6 +2447,27 @@ fn admin_on_user_scope_keeps_project_hook_when_user_settings_are_invalid() {
     assert!(out.contains("not valid JSON"), "{out}");
     assert_eq!(std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(), broken);
     assert_eq!(t.read(".claude/settings.local.json"), local_original);
+}
+
+/// Regression (PR #986 review): a user skill folder without its launcher is not
+/// a user-scope install `hooks on` can switch to. The project hook may still run
+/// another installation, so it stays, and `~/.claude/settings.json` is not written.
+#[test]
+fn admin_on_user_scope_without_launcher_keeps_project_hook() {
+    let t = Tmp::new();
+    let cwd = t.path();
+    let home = t.0.join("home");
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable")).unwrap();
+    let local_original = r#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\" hook"}]}]}}"#;
+    t.write(".claude/settings.local.json", local_original);
+    let home_text = home.to_string_lossy().to_string();
+    let r = rt_with(&cwd, env(&[("HOME", &home_text), ("USERPROFILE", &home_text)]));
+
+    let (out, _, code) = admin_run(&r, &["on"]);
+
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(t.read(".claude/settings.local.json"), local_original);
+    assert!(!home.join(".claude/settings.json").exists(), "{out}");
 }
 
 /// Regression (PR #986 review): a legacy `hook.mjs` entry already in

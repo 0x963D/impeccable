@@ -768,7 +768,10 @@ fn repair_hook_manifests(rt: &Runtime, cwd: &str) -> Result<Repaired, String> {
         let (skill_root, user_scoped) = if exists(&project_skill) {
             (project_skill, false)
         } else if target.provider == ".claude"
-            && exists(&user_skill)
+            // The launcher itself, not just the skill folder: a user hook
+            // naming a missing launcher is a no-op, and switching to it would
+            // prune a project hook that may still run another installation.
+            && exists(&jsp::join(&[&user_skill, "scripts", "impeccable"]))
             && (file_has_impeccable_hook_marker(&dest)
                 || shared_dest.as_ref().is_some_and(|path| file_has_impeccable_hook_marker(path)))
         {
