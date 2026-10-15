@@ -2445,6 +2445,41 @@ fn admin_on_user_scope_keeps_project_hook_when_user_settings_are_invalid() {
     assert_eq!(t.read(".claude/settings.local.json"), local_original);
 }
 
+/// Regression (PR #986 review): a legacy `hook.mjs` entry already in
+/// `~/.claude/settings.json` is not a current user hook. It is replaced with
+/// the launcher form, and only then is the project hook pruned.
+#[test]
+fn admin_on_replaces_legacy_user_hook_before_pruning_project_hook() {
+    let t = Tmp::new();
+    let cwd = t.path();
+    let home = t.0.join("home");
+    std::fs::create_dir_all(home.join(".claude/skills/impeccable/scripts")).unwrap();
+    std::fs::write(home.join(".claude/skills/impeccable/scripts/impeccable"), "#!/bin/sh\n").unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"model":"claude-sonnet-5","hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"node \"~/.claude/skills/impeccable/scripts/hook.mjs\""}]}]}}"#,
+    )
+    .unwrap();
+    t.write(
+        ".claude/settings.local.json",
+        r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\" hook"}]}]}}"#,
+    );
+    let home_text = home.to_string_lossy().to_string();
+    let r = rt_with(&cwd, env(&[("HOME", &home_text), ("USERPROFILE", &home_text)]));
+
+    let (out, _, code) = admin_run(&r, &["on"]);
+
+    assert_eq!(code, 0, "{out}");
+    let user_text = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+    assert!(!user_text.contains("hook.mjs"), "legacy user hook survived: {user_text}");
+    let user: Value = serde_json::from_str(&user_text).unwrap();
+    assert_eq!(user["model"], "claude-sonnet-5");
+    let command = user["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+    assert_eq!(command, expected_user_claude_hook_command(&home_text));
+    let local: Value = serde_json::from_str(&t.read(".claude/settings.local.json")).unwrap();
+    assert!(local.get("hooks").is_none(), "duplicate project hook survived: {local}");
+}
+
 #[test]
 fn admin_on_does_not_repair_project_manifests_from_other_user_scope_skills() {
     let t = Tmp::new();

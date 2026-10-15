@@ -654,9 +654,11 @@ fn install(flags: &[String], io: &mut Io) -> R<()> {
             if !written_hook_targets.is_empty() {
                 out(io, &format!("Installed hooks into: {}", written_hook_targets.join(", ")));
             }
-            // A repeat user-scope install whose user hook already exists never
-            // sends Claude through copy_provider_hooks, so the duplicate-hook
-            // cleanup that function ends with runs here as well.
+            // A repeat user-scope install whose user hook is already current
+            // never sends Claude through copy_provider_hooks, so the
+            // duplicate-hook cleanup that function ends with runs here as well.
+            // A legacy or dangling user hook is not current: it was rewritten
+            // above, and the cleanup itself re-checks before pruning.
             if want_hooks && scope == Scope::User && hook_targets.contains(&".claude") {
                 hook_manifest::prune_duplicate_claude_hooks(&sys, &install_root, &hook_root)?;
             }

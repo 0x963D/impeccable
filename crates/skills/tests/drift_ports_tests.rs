@@ -56,6 +56,9 @@ fn create_fake_universal_bundle(root: &str, providers: &[&str]) -> String {
             &format!("---\nname: impeccable\nversion: 9.9.9-local\n---\n\nLocal deterministic bundle for {provider}.\n"),
         );
         write(&format!("{skill_dir}/scripts/context.mjs"), "console.log(\"local bundle context\");\n");
+        // Real bundles ship the launcher; a user-scope Claude hook counts as
+        // current only when the launcher it names exists.
+        write(&format!("{skill_dir}/scripts/impeccable"), "#!/bin/sh\n");
     }
     if providers.contains(&".claude") {
         write(
@@ -801,6 +804,76 @@ fn repeat_user_install_prunes_duplicate_project_hook_when_user_hook_exists() {
     assert!(!local.contains("impeccable"), "duplicate project hook survived a repeat install: {local}");
     let local_json: Value = serde_json::from_str(&local).unwrap();
     assert_eq!(local_json["permissions"]["allow"][0], "Bash(ls)");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Regression (PR #986 review): a user hook that is only marked, not current
+/// (a legacy `hook.mjs` entry), must be rewritten on a repeat install, and the
+/// project hook may be pruned only once the user hook is current.
+#[test]
+fn repeat_user_install_replaces_legacy_user_hook_before_pruning_project_hook() {
+    let root = temp_root("claude-user-hook-legacy");
+    let project = format!("{root}/project");
+    let home = format!("{root}/home");
+    let tmpdir = format!("{root}/tmp");
+    for dir in [&project, &home, &tmpdir] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::create_dir_all(format!("{project}/.git")).unwrap();
+    let bundle = create_fake_universal_bundle(&project, &[".claude"]);
+    let env = base_env(&home, &tmpdir, &bundle);
+    let args = ["install", "-y", "--user", "--providers=claude"];
+
+    let first = run_cli(&args, &project, &env);
+    assert_eq!(first.code, 0, "{}\n{}", first.stdout, first.stderr);
+    let user_settings = format!("{home}/.claude/settings.json");
+    write(
+        &user_settings,
+        r#"{"model":"claude-sonnet-5","hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"node \"~/.claude/skills/impeccable/scripts/hook.mjs\""}]}]}}"#,
+    );
+    let project_local = format!("{project}/.claude/settings.local.json");
+    write(
+        &project_local,
+        r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\" hook"}]}]}}"#,
+    );
+
+    let second = run_cli(&args, &project, &env);
+    assert_eq!(second.code, 0, "{}\n{}", second.stdout, second.stderr);
+    let user = read(&user_settings);
+    assert!(manifest_names_launcher(&user_settings, &home, ".claude"), "user hook was not made current: {user}");
+    assert!(!user.contains("hook.mjs"), "legacy user hook survived: {user}");
+    let user_json: Value = serde_json::from_str(&user).unwrap();
+    assert_eq!(user_json["model"], "claude-sonnet-5");
+    let local = read(&project_local);
+    assert!(!local.contains("impeccable"), "duplicate project hook survived: {local}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A user hook naming a launcher that no longer exists is not current either:
+/// the project hook stays until a current user hook is written.
+#[test]
+fn user_hook_with_missing_launcher_is_not_current() {
+    let root = temp_root("claude-user-hook-dangling");
+    let home = format!("{root}/home");
+    let settings = format!("{home}/.claude/settings.json");
+    let command = impeccable_skills::hook_manifest::user_claude_hook_command(&home, false).unwrap();
+    write(
+        &settings,
+        &serde_json::json!({"hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":command}]}]}}).to_string(),
+    );
+    assert!(!impeccable_skills::hook_manifest::user_claude_hook_is_current_for(&home, false));
+    write(&format!("{home}/.claude/skills/impeccable/scripts/impeccable"), "#!/bin/sh\n");
+    assert!(impeccable_skills::hook_manifest::user_claude_hook_is_current_for(&home, false));
+    // A legacy entry beside the current one still needs a rewrite.
+    write(
+        &settings,
+        &serde_json::json!({"hooks":{"PostToolUse":[
+            {"hooks":[{"type":"command","command":command}]},
+            {"hooks":[{"type":"command","command":"node \"~/.claude/skills/impeccable/scripts/hook.mjs\""}]}
+        ]}})
+        .to_string(),
+    );
+    assert!(!impeccable_skills::hook_manifest::user_claude_hook_is_current_for(&home, false));
     std::fs::remove_dir_all(&root).ok();
 }
 
