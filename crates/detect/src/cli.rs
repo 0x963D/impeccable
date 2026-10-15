@@ -1,6 +1,7 @@
 //! Port of `cli/engine/cli/main.mjs`: `detectCli()`, the text formatter, and
 //! stdin dispatch.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 
 use impeccable_common::Io;
@@ -12,7 +13,7 @@ use crate::config::{
     filter_detection_findings, read_detection_config, should_ignore_detection_file, DetectionConfig,
 };
 use crate::design_system::{load_design_system_for_target, DesignSystemCache};
-use crate::detect_text::{detect_text, TextOptions};
+use crate::detect_text::{detect_text, ext_from_file_path, TextOptions};
 use crate::engines::{EngineError, Engines, ScanOptions};
 use crate::file_system::{
     build_import_graph_reporting, detect_framework_config, is_port_listening, uses_html_engine,
@@ -250,6 +251,11 @@ struct Ctx<'a> {
     /// Local files that went to the regex engine instead of the static HTML
     /// engine, so the run can say its findings are an undercount (#884).
     regex_only_files: usize,
+    /// Their extensions, lowercased and sorted, for the note.
+    regex_only_exts: BTreeSet<String>,
+    /// The first scanned directory's framework dev-server port, so the note
+    /// can spell the URL scan that runs every rule.
+    dev_server_port: Option<u32>,
     /// One line per design system that switched a check off for a scanned
     /// target (a DESIGN.md that declares a purple), and per URL scan note (a
     /// consent banner the engine hid), in first-seen order.
@@ -318,6 +324,7 @@ impl<'a> Ctx<'a> {
             }
         };
         self.regex_only_files += 1;
+        self.regex_only_exts.insert(ext_from_file_path(file_path));
         Ok(detect_text(
             &content,
             file_path,
@@ -574,6 +581,8 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
         stdin_tty,
         had_operational_failure: false,
         regex_only_files: 0,
+        regex_only_exts: BTreeSet::new(),
+        dev_server_port: None,
         design_notes: Vec::new(),
     };
 
@@ -619,11 +628,8 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
         }
         result?;
         if !json_mode && !quiet_mode && ctx.regex_only_files > 0 {
-            let n = ctx.regex_only_files;
-            ctx.io.err(&format!(
-                "\n{n} non-HTML file{} scanned with regex matching only.\nRules that need a parsed page (tiny-text, low-contrast and other element rules) are NOT evaluated there; findings are an undercount, not a clean bill of health.\nScan built .html files or a URL for full coverage.\n",
-                if n == 1 { "" } else { "s" }
-            ));
+            let note = regex_only_note(ctx.regex_only_files, &ctx.regex_only_exts, ctx.dev_server_port);
+            ctx.io.err(&note);
         }
     }
 
@@ -679,6 +685,42 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
 
 /// Text mode: say which checks a project's DESIGN.md switched off, after the
 /// findings (or alone, when there are none).
+/// Template extensions the static HTML engine can parse, so the note can
+/// offer the `detector.extensions` opt-in for them. JSX is not on the list:
+/// the parser reads nothing useful from it.
+const HTML_LIKE_TEMPLATE_EXTS: &[&str] = &[".astro", ".svelte", ".vue"];
+
+/// The #884 note: which files only got the regex engine, what that misses,
+/// and the scan that would run every rule.
+fn regex_only_note(n: usize, exts: &BTreeSet<String>, port: Option<u32>) -> String {
+    let listed: Vec<&str> = exts.iter().map(String::as_str).filter(|e| !e.is_empty()).collect();
+    let mut note = format!(
+        "\n{n} file{} scanned with regex matching only{}.\nRules that need a parsed page (tiny-text, low-contrast and other element rules) did not run on them; findings are an undercount, not a clean bill of health.\n",
+        if n == 1 { "" } else { "s" },
+        if listed.is_empty() { String::new() } else { format!(" ({})", listed.join(", ")) }
+    );
+    match port {
+        Some(p) => note.push_str(&format!(
+            "For the full check, scan the running app:\n  npx impeccable detect http://localhost:{p}\n"
+        )),
+        None => note.push_str(
+            "For the full check, scan the running dev server (npx impeccable detect http://localhost:PORT) or a static site's built .html.\n",
+        ),
+    }
+    let templates: Vec<&str> = listed
+        .iter()
+        .copied()
+        .filter(|e| HTML_LIKE_TEMPLATE_EXTS.contains(e))
+        .collect();
+    if let Some(first) = templates.first() {
+        note.push_str(&format!(
+            "{} files can take the HTML engine instead: add {{ \"ext\": \"{first}\", \"engine\": \"html\" }} under detector.extensions in .impeccable/config.json (trades the regex rules and line numbers for the element rules).\n",
+            templates.join("/")
+        ));
+    }
+    note
+}
+
 fn print_design_notes(ctx: &mut Ctx, after_findings: bool) {
     if ctx.design_notes.is_empty() {
         return;
@@ -767,6 +809,7 @@ fn scan_targets(
         if stat.is_dir() {
             if !ctx.json_mode && !ctx.quiet_mode {
                 if let Some(fw) = detect_framework_config(&resolved) {
+                    ctx.dev_server_port.get_or_insert(fw.port);
                     let probe = is_port_listening(fw.port, Some(fw.fingerprint));
                     let msg = if probe.listening && probe.matched {
                         format!(
