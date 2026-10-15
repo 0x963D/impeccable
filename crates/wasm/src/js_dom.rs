@@ -29,12 +29,14 @@ extern "C" {
     fn elements_from_point(x: f64, y: f64) -> Vec<u32>;
     fn css_escape(s: &str) -> String;
     fn keyframes(name: &str) -> Option<String>;
+    fn keyframe_keys(name: &str) -> Option<String>;
     fn document_html_for_patterns() -> String;
     fn linked_stylesheet_text() -> String;
     fn tag_name(el: u32) -> String;
     fn namespace_uri(el: u32) -> String;
     fn parent(el: u32) -> u32;
     fn children(el: u32) -> Vec<u32>;
+    fn shadow_children(el: u32) -> Vec<u32>;
     fn previous_element_sibling(el: u32) -> u32;
     fn next_element_sibling(el: u32) -> u32;
     fn contains(a: u32, b: u32) -> bool;
@@ -61,6 +63,9 @@ extern "C" {
     fn offset_width(el: u32) -> f64;
     fn offset_height(el: u32) -> f64;
     fn check_visibility(el: u32) -> i32;
+    fn image_natural_size(el: u32) -> Vec<f64>;
+    fn image_complete(el: u32) -> i32;
+    fn image_current_src(el: u32) -> Option<String>;
     fn direct_text_rect(el: u32) -> Vec<f64>;
     fn running_animation_properties(el: u32) -> Option<String>;
     fn text_rects(el: u32) -> Vec<f64>;
@@ -184,6 +189,9 @@ impl Dom for JsDom {
                 .collect(),
         )
     }
+    fn keyframe_keys(&self, name: &str) -> Option<Vec<String>> {
+        serde_json::from_str(&keyframe_keys(name)?).ok()
+    }
     fn linked_stylesheet_text(&self) -> String {
         linked_stylesheet_text()
     }
@@ -211,6 +219,13 @@ impl Dom for JsDom {
                 .or_insert_with(|| children(el))
                 .clone()
         })
+    }
+    /// The open shadow tree's top-level elements, so a web component that
+    /// lays out its content in its shadow tree is not read as empty. The
+    /// flat tree itself is not composed here (`flat_parent` stays the light
+    /// parent and `shadow_trees_recorded` false).
+    fn shadow_children(&self, el: ElId) -> Vec<ElId> {
+        shadow_children(el)
     }
     fn previous_element_sibling(&self, el: ElId) -> Option<ElId> {
         opt(previous_element_sibling(el))
@@ -370,6 +385,22 @@ impl Dom for JsDom {
             1 => Some(true),
             _ => None,
         }
+    }
+    fn image_natural_size(&self, el: ElId) -> Option<(f64, f64)> {
+        match image_natural_size(el)[..] {
+            [w, h] => Some((w, h)),
+            _ => None,
+        }
+    }
+    fn image_complete(&self, el: ElId) -> Option<bool> {
+        match image_complete(el) {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+    fn image_current_src(&self, el: ElId) -> Option<String> {
+        image_current_src(el)
     }
     fn direct_text_rect(&self, el: ElId) -> Option<Rect> {
         let v = direct_text_rect(el);

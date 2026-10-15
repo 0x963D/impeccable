@@ -225,9 +225,11 @@ pub const POSITIONED_CHILD_INTERACTIVE_SELECTOR: &str = "a[href],button,input,se
 
 /// Roles and attributes only a layer that has to escape its box carries.
 /// They override the mask and scroller exemptions of
-/// `clipped-overflow-container`: a menu parked by a transform is a menu.
+/// `clipped-overflow-container`: a menu parked by a transform is a menu. An
+/// open native `<dialog>` is a dialog without the role; a closed one renders
+/// nothing.
 pub const POPOVER_LAYER_SELECTOR: &str =
-    "[popover],[role=\"dialog\"],[role=\"listbox\"],[role=\"menu\"],[role=\"menubar\"],[role=\"tooltip\"]";
+    "[popover],dialog[open],[role=\"dialog\"],[role=\"listbox\"],[role=\"menu\"],[role=\"menubar\"],[role=\"tooltip\"]";
 
 // ─── Justified text ─────────────────────────────────────────────────────────
 

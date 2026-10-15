@@ -38,6 +38,20 @@
 //! `#BorlabsDialogBackdrop` (it stopped the reveal sweep from scrolling), and
 //! `aria-hidden="true"` on the page wrapper (`#td-outer-wrap`) and its
 //! siblings, each marked `data-borlabs-cookie-aria-hidden`.
+//!
+//! Runs 42 and 43 added two more. Tealium's consent prompt on telekom.de:
+//! `div#__tealiumGDPRecModal`, a fixed full-screen layer (`z-index`
+//! 2147483645) holding a 50% black `div.cl-outer` and the
+//! `dialog#promptLayerContent` that also carries the Utiq notice
+//! (`#utiqMessage`); Tealium's own script names that id and its preference
+//! center's, `#__tealiumGDPRcpPrefs`. On the home page it arrived after the
+//! capture and before the screenshot, so it covered nearly every crop. And
+//! Transcend on verizon.com: `div#transcend-consent-manager`, a zero-size
+//! fixed host on `<html>` whose open shadow root renders the banner
+//! (`div#consentManagerMainDialog`, a fixed 90px bar at the foot of the first
+//! screen). A site's own banner with generic classes (moe.gov.sa's
+//! `div.cookie-consent`, an Alpine.js dialog) stays: nothing in its markup
+//! tells it apart from any other dialog the site wrote.
 
 use serde_json::{json, Value};
 
@@ -218,6 +232,25 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         aria_hidden_marks: &[],
     },
     ConsentManager {
+        name: "Tealium",
+        // The consent prompt and the preference center, as Tealium's
+        // `utag.gdpr` script names them.
+        roots: &["#__tealiumGDPRecModal", "#__tealiumGDPRcpPrefs"],
+        backdrops: &[],
+        html_lock_classes: &[],
+        body_lock_classes: &[],
+        aria_hidden_marks: &[],
+    },
+    ConsentManager {
+        name: "Transcend",
+        // The banner renders in the open shadow root of this zero-size host.
+        roots: &["#transcend-consent-manager"],
+        backdrops: &[],
+        html_lock_classes: &[],
+        body_lock_classes: &[],
+        aria_hidden_marks: &[],
+    },
+    ConsentManager {
         name: "Google Funding Choices",
         roots: &[".fc-consent-root", ".fc-ccpa-root"],
         backdrops: &[".fc-dialog-overlay"],
@@ -229,6 +262,17 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
 
 /// The id of the style element the hide step injects.
 pub const HIDE_STYLE_ID: &str = "impeccable-consent-hide";
+
+/// Page JS: `el => bool`, whether an element marked with
+/// [`INLINE_HIDE_MARK`] still carries the inline hide a pass stamped on it,
+/// so lifting it shows the element as its manager left it. A manager that
+/// has since set its own display keeps what it set: a different value or
+/// priority, or the same `none !important` written by rewriting its style
+/// attribute (closing its dialog), which leaves the attribute's text apart
+/// from the declarations the stamp serialized. A rewrite that spells the
+/// stamp's own serialization, or a `setProperty` of the same value, changes
+/// nothing the page can observe.
+pub const STAMP_IS_OURS_JS: &str = "(el => el.style.getPropertyValue('display') === 'none' && el.style.getPropertyPriority('display') === 'important' && el.getAttribute('style') === el.style.cssText)";
 /// The attribute the hide step puts on an element it hid with an inline
 /// `display: none !important` (a manager whose own inline `!important`
 /// outranks the rule), holding the inline `display` it replaced as
@@ -256,12 +300,72 @@ fn managers_json() -> Value {
 /// Page JS shared by the probe and the hide step. `showing(el)` is whether an
 /// element (or, for a zero-size wrapper such as `#onetrust-consent-sdk`, one
 /// of its first descendants) paints a visible box.
+///
+/// A box with a size can still be out of every visitor's sight: a closed
+/// dialog a fixed layer parks past the viewport's edge, a box wholly above
+/// or beside the document, or one an ancestor's overflow clips away (a bar
+/// inside a wrapper collapsed to no height). `parkedAway` rejects those, as
+/// the rule pass's painted predicate does (`OutsideDocument`, `ClippedOut`).
+/// An overflow clip counts only on the ancestors that clip the box: an
+/// absolutely positioned box escapes the static ones between it and its
+/// containing block, and a fixed box every one below the ancestor that holds
+/// it (a transform, a filter, containment), or all of them when none does.
 const SHOWING_JS: &str = r#"const q = s => { try { return Array.from(document.querySelectorAll(s)); } catch (e) { return []; } };
+  const flatUp = n => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null;
+  // Whether a box makes a fixed descendant scroll with it (a transform, a
+  // filter, layout or paint containment), as the full-page screenshot asks.
+  const holdsFixed = cs => {
+    const none = v => !v || v === 'none';
+    return !none(cs.transform) || !none(cs.translate) || !none(cs.scale) || !none(cs.rotate)
+      || !none(cs.filter) || !none(cs.backdropFilter) || !none(cs.perspective)
+      || /transform|translate|scale|rotate|filter|perspective/.test(cs.willChange || '')
+      || /paint|layout|strict|content/.test(cs.contain || '');
+  };
+  const parkedAway = (el, r) => {
+    const vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+    const de = document.documentElement;
+    const top = a => !a || a === de || a === document.body;
+    // Up the chain of boxes that hold the box, each one's clip asked: an
+    // in-flow box's parent, an absolutely positioned box's nearest
+    // positioned (or fixed-holding) ancestor, a fixed box's nearest
+    // fixed-holding ancestor, or the viewport when it has none.
+    let pos = getComputedStyle(el).position;
+    let cur = el;
+    let viewport = false;
+    for (let n = 0; n < 60; n++) {
+      let a = flatUp(cur);
+      let cs = null;
+      for (; !top(a) && n < 60; a = flatUp(a), n++) {
+        cs = getComputedStyle(a);
+        if (cs.display === 'contents') continue;
+        if (pos === 'fixed' ? holdsFixed(cs) : pos === 'absolute' ? (cs.position !== 'static' || holdsFixed(cs)) : true) break;
+      }
+      if (top(a)) {
+        viewport = pos === 'fixed' && !(document.body && holdsFixed(getComputedStyle(document.body))) && !holdsFixed(getComputedStyle(de));
+        break;
+      }
+      const clipX = cs.overflowX !== 'visible', clipY = cs.overflowY !== 'visible';
+      if (clipX || clipY) {
+        const pr = a.getBoundingClientRect();
+        if ((clipX && (r.right <= pr.left || r.left >= pr.right)) || (clipY && (r.bottom <= pr.top || r.top >= pr.bottom))) return true;
+      }
+      cur = a;
+      pos = cs.position;
+    }
+    if (viewport) return vw > 0 && vh > 0 && (r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh);
+    if (r.bottom + window.scrollY <= 0) return true;
+    const se = document.scrollingElement || de;
+    const docW = se ? se.scrollWidth : 0;
+    if (!(docW > 0) || !(vw > 0)) return false;
+    const rtl = getComputedStyle(de).direction === 'rtl';
+    const start = rtl ? vw - docW : 0, end = rtl ? vw : docW;
+    return r.right + window.scrollX <= start || r.left + window.scrollX >= end;
+  };
   const boxShows = el => {
     try {
       if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
       const r = el.getBoundingClientRect();
-      return r.width >= 1 && r.height >= 1;
+      return r.width >= 1 && r.height >= 1 && !parkedAway(el, r);
     } catch (e) { return false; }
   };
   const showing = el => {
@@ -364,16 +468,24 @@ pub fn probe_fragment() -> String {
   // either: it counts as text outside the managers.
   let consentPageShadowChars = 0;
   // The page's open shadow roots, outside the managers: their form
-  // controls and media are the page's as much as their text is.
+  // controls and media are the page's as much as their text is. Roots
+  // nested inside other roots (a login component in an app shell's tree)
+  // count too; their text is already in the outer root's, so only the roots
+  // on light-DOM hosts add text.
   const pageShadows = [];
   if (consentRoots.length && document.body) {{
-    const hosts = document.body.querySelectorAll('*');
-    for (let i = 0; i < hosts.length && i < 30000; i++) {{
-      const host = hosts[i];
-      if (!host.shadowRoot || consentRoots.some(r => r.contains(host))) continue;
-      pageShadows.push(host.shadowRoot);
-      for (const child of host.shadowRoot.children) consentPageShadowChars += shadowText(child);
-    }}
+    let seen = 0;
+    const visitShadows = (scope, top) => {{
+      const hosts = scope.querySelectorAll('*');
+      for (let i = 0; i < hosts.length && seen < 30000; i++, seen++) {{
+        const host = hosts[i];
+        if (!host.shadowRoot || consentRoots.some(r => r.contains(host))) continue;
+        pageShadows.push(host.shadowRoot);
+        if (top) for (const child of host.shadowRoot.children) consentPageShadowChars += shadowText(child);
+        visitShadows(host.shadowRoot, false);
+      }}
+    }};
+    visitShadows(document.body, true);
   }}
   if (consentRoots.length) {{
     const inside = el => consentRoots.some(r => r.contains(el));
@@ -437,7 +549,7 @@ pub fn hide_js() -> String {
   if (style) style.disabled = true;
   // So are the inline hides an earlier pass stamped, while they are still
   // its own (a manager that has since set its own display keeps it).
-  const lifted = q('[' + INLINE_MARK + ']').filter(el => el.style.getPropertyValue('display') === 'none' && el.style.getPropertyPriority('display') === 'important');
+  const lifted = q('[' + INLINE_MARK + ']').filter({stamp_is_ours});
   for (const el of lifted) {{
     let prev = ['', ''];
     try {{ prev = JSON.parse(el.getAttribute(INLINE_MARK)); }} catch (e) {{}}
@@ -533,6 +645,7 @@ pub fn hide_js() -> String {
         style_id = json!(HIDE_STYLE_ID),
         inline_mark = json!(INLINE_HIDE_MARK),
         showing = SHOWING_JS,
+        stamp_is_ours = STAMP_IS_OURS_JS,
     )
 }
 
@@ -615,7 +728,7 @@ mod tests {
         for name in [
             "OneTrust", "Cookiebot", "Usercentrics", "TrustArc", "Didomi", "Quantcast Choice", "Sourcepoint",
             "Osano", "CookieYes", "Complianz", "iubenda", "Termly", "Axeptio", "Borlabs Cookie", "Klaro",
-            "Cookie Notice", "Shopify", "consentmanager",
+            "Cookie Notice", "Shopify", "consentmanager", "Tealium", "Transcend",
         ] {
             assert!(CONSENT_MANAGERS.iter().any(|m| m.name == name), "{name}");
         }

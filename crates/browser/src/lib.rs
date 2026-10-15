@@ -19,7 +19,7 @@
 //! challenge, an HTTP error page, or a page that is only a consent wall is
 //! refused with an error instead of being scanned and reported clean. Then
 //! the banners of known consent managers are hidden ([`consent`]), and so are
-//! known product tours and preloaders still covering the page
+//! known product tours, builder badges and preloaders still covering the page
 //! ([`overlays`]), so every pass and the screenshot see the page a visitor
 //! sees once they dismiss them.
 //!
@@ -296,6 +296,9 @@ struct RawResult {
     /// The third-party vendor the finding belongs to (see
     /// [`impeccable_core::third_party`]); its message already names it.
     third_party: Option<String>,
+    /// For a page-level finding, where the evidence step found the element
+    /// that carries its declaration ([`Evidence::page_anchors`]).
+    anchor: Option<Value>,
 }
 
 impl RawResult {
@@ -309,6 +312,7 @@ impl RawResult {
             origin,
             scan_el: None,
             third_party: None,
+            anchor: None,
         }
     }
 }
@@ -346,6 +350,26 @@ pub struct Evidence {
     /// Per flagged selector, measured after the scan: `{ tag, text, html,
     /// styles }` (text and html truncated; a fixed set of computed styles).
     pub element_details: Map<String, Value>,
+    /// Flagged selectors whose element the evidence step found nowhere: the
+    /// scan's element has left the document and the selector matches
+    /// nothing. The finding was true of a state the page has left (an intro
+    /// screen, a toast), so it has no rect, no details and no crop.
+    pub transient: Vec<String>,
+    /// Flagged selectors whose element sat more than a viewport width from
+    /// where the scan's capture had it, and was still there after the
+    /// evidence step measured it again for up to [`DRIFT_REMEASURE`] (a
+    /// carousel that autoplayed on, a layout that shifted for good):
+    /// `{ scan: [x, y, width, height], measured: [x, y, width, height] }`,
+    /// document coordinates. [`Evidence::element_rects`] keeps the measured
+    /// rect, which matches the screenshot; the element there is the scan's,
+    /// not the state it was scored in.
+    pub element_drift: Map<String, Value>,
+    /// Parallel to the findings: for a page-level finding (on `body` or
+    /// `html`) whose declaration a painted element carries (a radial-gradient
+    /// halo or a glow, its `var()` resolved), that element measured after the
+    /// scan, `{ rect: [x, y, width, height], tag, id, class }`; `null`
+    /// otherwise. See [`impeccable_core::browser::driver::page_form_anchor`].
+    pub page_anchors: Vec<Value>,
     pub screenshot: Option<Screenshot>,
     /// Why no screenshot was taken, when one was requested and failed.
     pub screenshot_error: Option<String>,
@@ -357,9 +381,9 @@ pub struct Evidence {
     /// that matched and the scroll locks undone. `None` when hiding was off
     /// ([`ScanOptions::keep_consent_banners`]) or the page was blocked.
     pub consent: Option<ConsentReport>,
-    /// The product tours and preloaders the scan hid ([`overlays`]), the
-    /// selectors that matched, what was undone, and how long the scan waited
-    /// for a preloader. `None` when hiding was off
+    /// The product tours, builder badges and preloaders the scan hid
+    /// ([`overlays`]), the selectors that matched, what was undone, and how
+    /// long the scan waited for a preloader. `None` when hiding was off
     /// ([`ScanOptions::keep_overlays`]) or the page was blocked.
     pub overlays: Option<OverlayReport>,
 }
@@ -584,13 +608,14 @@ fn consent_note(url: &str, hidden: &[String]) -> String {
     format!("Hid the {names} consent {noun} on {url} before scanning. Pass --no-consent-hiding to scan it.")
 }
 
-/// The text-mode note for a scan that hid tours or preloaders.
+/// The text-mode note for a scan that hid tours, badges or preloaders.
 fn overlay_note(url: &str, report: &OverlayReport) -> String {
     let parts: Vec<String> = report
         .hidden
         .iter()
         .map(|h| match h.kind.as_str() {
             "tour" => format!("the {} tour", h.name),
+            "badge" => format!("the {} badge", h.name),
             "preloader" => format!("the preloader {}", h.name),
             other => format!("the {other} {}", h.name),
         })
@@ -643,8 +668,9 @@ pub fn detect_url_evidence(
         evidence.overlays = Some(overlays);
     }
     let results = results?;
-    let (findings, origins) = results_to_findings(&url, results, options.design_system.as_deref())?;
+    let (findings, origins, anchors) = results_to_findings_with(&url, results, options.design_system.as_deref())?;
     evidence.origins = origins;
+    evidence.page_anchors = anchors;
     Ok((findings, evidence))
 }
 
@@ -726,12 +752,23 @@ fn results_to_findings(
     results: Vec<RawResult>,
     design_system: Option<&DesignSystem>,
 ) -> Result<(Vec<Finding>, Vec<&'static str>), EngineError> {
+    results_to_findings_with(url, results, design_system).map(|(f, o, _)| (f, o))
+}
+
+/// [`results_to_findings`], also returning each kept finding's
+/// [`Evidence::page_anchors`] entry.
+fn results_to_findings_with(
+    url: &str,
+    results: Vec<RawResult>,
+    design_system: Option<&DesignSystem>,
+) -> Result<(Vec<Finding>, Vec<&'static str>, Vec<Value>), EngineError> {
     let purple_off = design_system
         .filter(|ds| ds.present)
         .and_then(|ds| ds.declared_purple())
         .is_some();
     let mut findings = Vec::with_capacity(results.len());
     let mut origins = Vec::with_capacity(results.len());
+    let mut anchors = Vec::with_capacity(results.len());
     for r in results {
         if purple_off && impeccable_core::checks::rules::is_purple_palette_finding(&r.id, &r.snippet) {
             continue;
@@ -758,8 +795,9 @@ fn results_to_findings(
         impeccable_core::findings::derive_advisory_flag(&mut item);
         findings.push(item);
         origins.push(r.origin);
+        anchors.push(r.anchor.unwrap_or(Value::Null));
     }
-    Ok((findings, origins))
+    Ok((findings, origins, anchors))
 }
 
 /// Flatten `serialize_findings` groups into raw results, each carrying its
@@ -784,6 +822,7 @@ fn results_from_groups(groups: &[Value]) -> Vec<RawResult> {
                     .get("thirdParty")
                     .and_then(Value::as_str)
                     .map(String::from),
+                anchor: None,
             });
         }
     }
@@ -836,11 +875,23 @@ fn hand_over(results: &mut [RawResult], handed: &[bool]) {
 /// r6-t5-unread-pixel-verdicts). Its text is unchanged. Only the verdicts
 /// `hand_over` moved to the visual-contrast origin are touched: the scan
 /// origin is what a replay reproduces, and a replay has no pixels.
-fn settle_handed_over(results: &mut Vec<RawResult>, superseded: &[String]) {
+///
+/// A selector that names several elements (a repeated id) is told apart by
+/// its match (`[n, count]`): `match_of` gives a result's, and a pixel verdict
+/// on one copy leaves the verdict on another standing.
+fn settle_handed_over(
+    results: &mut Vec<RawResult>,
+    superseded: &[CandidateKey],
+    match_of: impl Fn(&RawResult) -> Option<Value>,
+) {
     let handed = |r: &RawResult| r.origin == origin::VISUAL_CONTRAST && r.id == "low-contrast";
     if !superseded.is_empty() {
         results.retain(|r| {
-            !(handed(r) && r.selector.as_deref().is_some_and(|s| superseded.iter().any(|x| x == s)))
+            !(handed(r)
+                && r.selector.as_deref().is_some_and(|s| {
+                    let m = match_of(r);
+                    superseded.iter().any(|k| k.names(s, m.as_ref()))
+                }))
         });
     }
     for r in results.iter_mut().filter(|r| handed(r)) {
@@ -971,32 +1022,78 @@ fn check_validity(
     Ok((response, probe, verdict))
 }
 
-/// The consent-wall verdict for a page whose consent manager arrived after
-/// the load-time validity check, with the probe it was read from. `None`
-/// when the page is not a consent wall now, or the probe failed (the hide
-/// pass then runs as before).
-fn late_consent_wall(page: &mut Page<'_>) -> Option<(PageProbe, PageValidity)> {
-    // The first hide pass's rules are on: a root that was an empty stub then
+/// What a late consent pass ([`late_consent_pass`]) found.
+enum LateConsent {
+    /// The page is a consent wall now, with the probe it was read from.
+    Wall(PageProbe, PageValidity),
+    /// It is not; `changed` is whether the hide step altered the page.
+    Clear { changed: bool },
+}
+
+/// The consent-wall check and the hide step for a manager that arrived after
+/// the load-time validity check, in one evaluation: discovery,
+/// classification and hiding read the same page, so a manager inserted in
+/// between can never be hidden without being asked whether it is a wall.
+/// The hide step runs either way (a wall is refused, so what it hid does not
+/// matter); the verdict is read in Rust off the probe it returns. A failed
+/// evaluation falls back to the hide step alone, which is best-effort as
+/// before.
+fn late_consent_pass(page: &mut Page<'_>, consent: &mut ConsentReport) -> LateConsent {
+    // The earlier passes' rules are on: a root that was an empty stub then
     // is hidden by them now, though it holds the wall. The probe reads the
     // page with them off, in one task, so nothing paints in between.
-    // The same goes for the inline hides that pass stamped on a manager
+    // The same goes for the inline hides those passes stamped on a manager
     // whose own inline `!important` outranked the rules, while they are still
-    // its own: a manager that has since set its own display (closing its
-    // dialog) keeps what it set.
+    // theirs ([`consent::STAMP_IS_OURS_JS`]): a manager that has since set its
+    // own display (closing its dialog) keeps what it set. The probe only runs
+    // when a manager's root is in the page, since it is a wall check.
+    let roots: Vec<&str> = consent::CONSENT_MANAGERS.iter().flat_map(|m| m.roots.iter().copied()).collect();
     let expr = format!(
-        "(() => {{ const s = document.getElementById({id}); const marked = Array.from(document.querySelectorAll('[' + {mark} + ']')).filter(el => el.style.getPropertyValue('display') === 'none' && el.style.getPropertyPriority('display') === 'important'); const put = marked.map(el => {{ let prev = ['', '']; try {{ prev = JSON.parse(el.getAttribute({mark})); }} catch (e) {{}} if (prev[0]) el.style.setProperty('display', prev[0], prev[1]); else el.style.removeProperty('display'); return el; }}); if (s) s.disabled = true; try {{ return {probe}; }} finally {{ if (s) s.disabled = false; for (const el of put) el.style.setProperty('display', 'none', 'important'); }} }})()",
+        "(() => {{ const roots = {roots}; let any = false; for (const sel of roots) {{ try {{ if (document.querySelector(sel)) {{ any = true; break; }} }} catch (e) {{}} }} let probe = null; if (any) {{ try {{ probe = (() => {{ const s = document.getElementById({id}); const marked = Array.from(document.querySelectorAll('[' + {mark} + ']')).filter({ours}); const put = marked.map(el => {{ let prev = ['', '']; try {{ prev = JSON.parse(el.getAttribute({mark})); }} catch (e) {{}} if (prev[0]) el.style.setProperty('display', prev[0], prev[1]); else el.style.removeProperty('display'); return el; }}); if (s) s.disabled = true; try {{ return {probe}; }} finally {{ if (s) s.disabled = false; for (const el of put) el.style.setProperty('display', 'none', 'important'); }} }})(); }} catch (e) {{ probe = null; }} }} const hide = {hide}; return {{ probe, hide }}; }})()",
+        roots = serde_json::json!(roots),
         id = serde_json::json!(consent::HIDE_STYLE_ID),
         mark = serde_json::json!(consent::INLINE_HIDE_MARK),
+        ours = consent::STAMP_IS_OURS_JS,
         probe = validity::probe_js(),
+        hide = consent::hide_js(),
     );
-    let raw = page.evaluate_value(&expr).ok()?;
-    let probe = PageProbe::from_value(&raw);
-    if probe.consent.is_empty() {
-        return None;
+    let raw = match page.evaluate_value(&expr) {
+        Ok(v) => v,
+        Err(_) => return LateConsent::Clear { changed: hide_consent_banners(page, consent) },
+    };
+    let hide = raw.get("hide").cloned().unwrap_or(Value::Null);
+    consent.merge(&hide);
+    let changed = hide.get("changed").and_then(Value::as_bool).unwrap_or(false);
+    if let Some(probe) = raw.get("probe").filter(|p| p.is_object()).map(PageProbe::from_value) {
+        if !probe.consent.is_empty() {
+            let verdict = validity::classify_with(None, &probe, true);
+            if matches!(verdict, PageValidity::Blocked { kind: validity::BlockKind::ConsentWall, .. }) {
+                return LateConsent::Wall(probe, verdict);
+            }
+        }
     }
-    let verdict = validity::classify_with(None, &probe, true);
-    matches!(verdict, PageValidity::Blocked { kind: validity::BlockKind::ConsentWall, .. })
-        .then_some((probe, verdict))
+    LateConsent::Clear { changed }
+}
+
+/// The refusal for a page [`late_consent_pass`] found to be a consent wall:
+/// the error a plain scan returns, or, for an evidence scan, the probe and
+/// verdict recorded beside an empty finding list.
+fn refuse_late_wall(
+    page: &mut Page<'_>,
+    evidence: Option<(&mut Evidence, &EvidenceRequest)>,
+    probe: PageProbe,
+    verdict: PageValidity,
+) -> Result<Vec<RawResult>, EngineError> {
+    let message = verdict.error_message().unwrap_or_default();
+    match evidence {
+        None => Err(EngineError::new(message)),
+        Some((ev, request)) => {
+            ev.probe = Some(probe);
+            ev.validity = Some(verdict);
+            let _ = capture_post_scan(page, ev, request, &[], &Map::new(), &Map::new(), &[]);
+            Ok(Vec::new())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1050,7 +1147,7 @@ fn scan_page_inner(
         return match evidence {
             None => Err(EngineError::new(message)),
             Some((ev, request)) => {
-                capture_post_scan(page, ev, request, &[], &Map::new());
+                let _ = capture_post_scan(page, ev, request, &[], &Map::new(), &Map::new(), &[]);
                 Ok(Vec::new())
             }
         };
@@ -1097,19 +1194,11 @@ fn scan_page_inner(
     // banner can be the whole page, so the consent-wall gate runs again
     // first: hiding a wall would leave nothing to read and report it clean.
     if hide_consent {
-        if let Some((probe, verdict)) = late_consent_wall(page) {
-            let message = verdict.error_message().unwrap_or_default();
-            return match evidence {
-                None => Err(EngineError::new(message)),
-                Some((ev, request)) => {
-                    ev.probe = Some(probe);
-                    ev.validity = Some(verdict);
-                    capture_post_scan(page, ev, request, &[], &Map::new());
-                    Ok(Vec::new())
-                }
-            };
+        if let LateConsent::Wall(probe, verdict) =
+            step(profile, "scan", "hide-consent", url, || late_consent_pass(page, consent))
+        {
+            return refuse_late_wall(page, evidence, probe, verdict);
         }
-        step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
     }
     if hide_overlays {
         step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
@@ -1124,8 +1213,11 @@ fn scan_page_inner(
     // A banner that arrived around the capture is hidden, and the page
     // captured again, so the capture, the live hit tests and the pixel reads
     // all see the page without it.
-    let consent_changed =
-        hide_consent && step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
+    let consent_changed = hide_consent
+        && match step(profile, "scan", "hide-consent", url, || late_consent_pass(page, consent)) {
+            LateConsent::Wall(probe, verdict) => return refuse_late_wall(page, evidence, probe, verdict),
+            LateConsent::Clear { changed } => changed,
+        };
     let overlays_changed =
         hide_overlays && step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
     if consent_changed || overlays_changed {
@@ -1183,6 +1275,7 @@ fn scan_page_inner(
     // content-hidden-at-rest: what is still hidden once the reveal handlers
     // have run, measured over the same post-reveal capture.
     let mut unstarted: Option<(f64, Vec<String>)> = None;
+    let mut probed = false;
     let hidden = step_findings(profile, "scan", "content-hidden-at-rest", url, || {
         let mut facts = evidence.as_mut().map(|(ev, _)| &mut ev.scan_facts);
         let _ = base.take_scroll_probes();
@@ -1202,6 +1295,7 @@ fn scan_page_inner(
             if probes.is_empty() {
                 break;
             }
+            probed = true;
             let answers = step(profile, "scan", "scroll-probe", url, || {
                 snapshot_engine::probe_shown_on_scroll(page, &probes)
             })
@@ -1230,6 +1324,23 @@ fn scan_page_inner(
         ))
     })?;
     results.extend(hidden);
+    // The scroll probe scrolled the page after every pre-capture pass, and a
+    // manager or a tour that injects on scroll would now sit over the page
+    // for the pixel pass's hit tests and shots. The late consent check and
+    // the hide steps run once more; the capture the rule pass read predates
+    // them, so it stands.
+    if probed {
+        if hide_consent {
+            if let LateConsent::Wall(probe, verdict) =
+                step(profile, "scan", "hide-consent", url, || late_consent_pass(page, consent))
+            {
+                return refuse_late_wall(page, evidence, probe, verdict);
+            }
+        }
+        if hide_overlays {
+            step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
+        }
+    }
     if let Some(note) = unstarted.and_then(|(chars, samples)| unstarted_slider_note(url, chars, &samples)) {
         notes.push(note);
     }
@@ -1250,7 +1361,9 @@ fn scan_page_inner(
     .map_err(cdp_err)?;
     let (mut visual, superseded) =
         run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
-    settle_handed_over(&mut results, &superseded);
+    settle_handed_over(&mut results, &superseded, |r| {
+        repeated_match(&base, r.selector.as_deref()?, r.scan_el?)
+    });
     for r in visual.iter_mut() {
         tag_widget_vendor(&base, r);
     }
@@ -1277,8 +1390,27 @@ fn scan_page_inner(
                 }
             }
         }
+        // A result whose pass named no element (the visual pass on a
+        // selector with no id) is bound to the selector's one match in the
+        // capture, which is the element the pass measured.
+        for r in results.iter_mut().filter(|r| r.scan_el.is_none()) {
+            r.scan_el = r.selector.as_deref().and_then(|s| sole_match(&base, s));
+        }
         let identities = scan_identities(&base, &results);
-        capture_post_scan(page, ev, request, &selectors, &identities);
+        let nodes = scan_nodes(&base, &results);
+        let anchors: Vec<Option<ElId>> = results
+            .iter()
+            .map(|r| {
+                let page_level = matches!(r.selector.as_deref(), Some("body") | Some("html") | None);
+                (page_level && r.origin == origin::SCAN)
+                    .then(|| impeccable_core::browser::driver::page_form_anchor(&base, &r.id, &r.snippet))
+                    .flatten()
+            })
+            .collect();
+        let measured = capture_post_scan(page, ev, request, &selectors, &identities, &nodes, &anchors);
+        for (r, anchor) in results.iter_mut().zip(measured) {
+            r.anchor = anchor;
+        }
     }
     Ok(results)
 }
@@ -1422,6 +1554,41 @@ fn scan_identities(dom: &SnapshotDom, results: &[RawResult]) -> Map<String, Valu
     out
 }
 
+/// The one element `selector` matches in `dom`, if it matches exactly one.
+fn sole_match(dom: &SnapshotDom, selector: &str) -> Option<ElId> {
+    match dom.query_all(None, selector).ok()?.as_slice() {
+        [el] => Some(*el),
+        _ => None,
+    }
+}
+
+/// Per flagged selector whose element the scan knows, `[id, x, y, width,
+/// height]`: the element's id in the scan's capture, which the evidence step
+/// resolves before the selector ([`fullpage::RESOLVE_FLAGGED_JS`]), and its
+/// document rect there, against which the evidence step measures drift. The
+/// first result naming a selector decides, as for [`scan_identities`].
+fn scan_nodes(dom: &SnapshotDom, results: &[RawResult]) -> Map<String, Value> {
+    let mut out = Map::new();
+    let (sx, sy) = (dom.scroll_x(), dom.scroll_y());
+    for r in results {
+        let Some(selector) = r.selector.as_deref() else { continue };
+        if out.contains_key(selector) {
+            continue;
+        }
+        if let Some(el) = r.scan_el {
+            let b = dom.rect(el);
+            out.insert(selector.to_string(), json!([el, b.left + sx, b.top + sy, b.width, b.height]));
+        }
+    }
+    out
+}
+
+/// How long the evidence step keeps measuring an element that sits more than
+/// a viewport width from where the scan's capture had it, waiting for it to
+/// come back (a carousel cycling round), and how often it looks.
+pub const DRIFT_REMEASURE: Duration = Duration::from_millis(1500);
+const DRIFT_POLL: Duration = Duration::from_millis(250);
+
 /// The element a visual-contrast result on `selector` was measured on: the
 /// match whose box gives the clip of every analysis on that selector (the
 /// collector's `clip`, from the capture's rect and scroll). `None` when no
@@ -1467,27 +1634,48 @@ fn visual_scan_element(dom: &SnapshotDom, selector: &str, analyses: &[Value]) ->
 /// run, so a live scan and an evidence scan drive the page identically up to
 /// here. Failures are recorded on the evidence, never raised: the findings
 /// stand without them.
+///
+/// Each flagged selector is measured on the element the scan flagged while
+/// that element is still in the document (`nodes`), and on the selector's
+/// match otherwise ([`fullpage::RESOLVE_FLAGGED_JS`]). One found nowhere is
+/// [`Evidence::transient`]. One that sits more than a viewport width from
+/// where the scan's capture had it is measured again until it comes back or
+/// [`DRIFT_REMEASURE`] runs out, and recorded in [`Evidence::element_drift`]
+/// if it does not. Returns, parallel to `anchors` (an element of the scan's
+/// capture per result, or none), each anchor's [`Evidence::page_anchors`]
+/// entry.
 fn capture_post_scan(
     page: &mut Page<'_>,
     ev: &mut Evidence,
     request: &EvidenceRequest,
     selectors: &[String],
     identities: &Map<String, Value>,
-) {
-    if !selectors.is_empty() {
+    nodes: &Map<String, Value>,
+    anchors: &[Option<ElId>],
+) -> Vec<Option<Value>> {
+    let mut anchored: Vec<Option<Value>> = vec![None; anchors.len()];
+    if !selectors.is_empty() || anchors.iter().any(Option::is_some) {
+        let anchor_ids: Vec<Value> = anchors.iter().map(|a| a.map_or(Value::Null, |id| json!(id))).collect();
         let expr = format!(
             r#"(() => {{
   const props = ['display', 'position', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-transform', 'text-align', 'color', 'background-color', 'background-image', 'border', 'border-radius', 'box-shadow', 'padding', 'margin', 'width', 'height', 'max-width', 'opacity'];
   const resolve = {resolve};
   const identities = {ids};
+  const nodes = {nodes};
   const rects = {{}};
   const details = {{}};
+  const missing = [];
+  const drifted = [];
+  const vw = window.innerWidth || 0;
   for (const s of {sels}) {{
     try {{
-      const el = resolve(s, identities[s]);
-      if (!el) continue;
+      const n = nodes[s];
+      const el = resolve(s, identities[s], n ? n[0] : null);
+      if (!el) {{ missing.push(s); continue; }}
       const r = el.getBoundingClientRect();
-      rects[s] = [r.x + window.scrollX, r.y + window.scrollY, r.width, r.height];
+      const rect = [r.x + window.scrollX, r.y + window.scrollY, r.width, r.height];
+      rects[s] = rect;
+      if (n && vw > 0 && Math.max(Math.abs(rect[0] - n[1]), Math.abs(rect[1] - n[2])) > vw) drifted.push(s);
       const cs = getComputedStyle(el);
       const styles = {{}};
       for (const p of props) styles[p] = cs.getPropertyValue(p);
@@ -1499,11 +1687,28 @@ fn capture_post_scan(
       }};
     }} catch (e) {{}}
   }}
-  return {{ rects, details }};
+  const cap = window.__impCap;
+  const anchors = {anchors}.map(id => {{
+    try {{
+      const el = id && cap && cap.elements ? cap.elements[id] : null;
+      if (!el || !el.isConnected) return null;
+      const r = el.getBoundingClientRect();
+      if (!(r.width >= 1 && r.height >= 1)) return null;
+      return {{
+        rect: [r.x + window.scrollX, r.y + window.scrollY, r.width, r.height],
+        tag: el.tagName.toLowerCase(),
+        id: el.id || '',
+        class: typeof el.className === 'string' ? el.className : (el.getAttribute('class') || ''),
+      }};
+    }} catch (e) {{ return null; }}
+  }});
+  return {{ rects, details, missing, drifted, anchors }};
 }})()"#,
             sels = json!(selectors),
             resolve = fullpage::RESOLVE_FLAGGED_JS,
             ids = Value::Object(identities.clone()),
+            nodes = Value::Object(nodes.clone()),
+            anchors = Value::Array(anchor_ids),
         );
         if let Ok(v) = page.evaluate_value(&expr) {
             if let Some(Value::Object(m)) = v.get("rects") {
@@ -1512,10 +1717,26 @@ fn capture_post_scan(
             if let Some(Value::Object(m)) = v.get("details") {
                 ev.element_details = m.clone();
             }
+            let strs = |k: &str| -> Vec<String> {
+                v.get(k)
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+                    .unwrap_or_default()
+            };
+            ev.transient = strs("missing");
+            let drifted = strs("drifted");
+            if !drifted.is_empty() {
+                remeasure_drifted(page, ev, drifted, identities, nodes);
+            }
+            if let Some(Value::Array(a)) = v.get("anchors") {
+                for (slot, value) in anchored.iter_mut().zip(a) {
+                    *slot = Some(value.clone()).filter(|v| !v.is_null());
+                }
+            }
         }
     }
     if !request.screenshot {
-        return;
+        return anchored;
     }
     match fullpage::capture_full_page(page, request.max_screenshot_height, request.jpeg_quality) {
         Ok(shot) => {
@@ -1523,6 +1744,7 @@ fn capture_post_scan(
                 page,
                 &ev.element_rects,
                 identities,
+                nodes,
                 shot.origin_x,
                 shot.width,
                 shot.height,
@@ -1531,6 +1753,83 @@ fn capture_post_scan(
             ev.screenshot = Some(shot);
         }
         Err(e) => ev.screenshot_error = Some(e.message),
+    }
+    anchored
+}
+
+/// Measure the `drifted` selectors again every [`DRIFT_POLL`] until each is
+/// back within a viewport width of where the scan's capture had it, or
+/// [`DRIFT_REMEASURE`] runs out. Every measure replaces the rect, so the rect
+/// is the latest one before the screenshot that follows; one that never came
+/// back is recorded in [`Evidence::element_drift`] with its rect in the
+/// capture, and one that left the page during the wait joins
+/// [`Evidence::transient`] with no rect. Best-effort: a failed measurement
+/// ends the wait.
+fn remeasure_drifted(
+    page: &mut Page<'_>,
+    ev: &mut Evidence,
+    mut drifted: Vec<String>,
+    identities: &Map<String, Value>,
+    nodes: &Map<String, Value>,
+) {
+    let started = Instant::now();
+    while !drifted.is_empty() && started.elapsed() < DRIFT_REMEASURE {
+        std::thread::sleep(DRIFT_POLL);
+        let expr = format!(
+            r#"(() => {{
+  const resolve = {resolve};
+  const identities = {ids};
+  const nodes = {nodes};
+  const vw = window.innerWidth || 0;
+  const rects = {{}};
+  const back = [];
+  const gone = [];
+  for (const s of {sels}) {{
+    try {{
+      const n = nodes[s];
+      const el = resolve(s, identities[s], n ? n[0] : null);
+      if (!el) gone.push(s);
+      if (!el || !n) continue;
+      const r = el.getBoundingClientRect();
+      const rect = [r.x + window.scrollX, r.y + window.scrollY, r.width, r.height];
+      rects[s] = rect;
+      if (Math.max(Math.abs(rect[0] - n[1]), Math.abs(rect[1] - n[2])) <= vw) back.push(s);
+    }} catch (e) {{}}
+  }}
+  return {{ rects, back, gone }};
+}})()"#,
+            resolve = fullpage::RESOLVE_FLAGGED_JS,
+            ids = Value::Object(identities.clone()),
+            nodes = Value::Object(nodes.clone()),
+            sels = json!(drifted),
+        );
+        let Ok(v) = page.evaluate_value(&expr) else { break };
+        if let Some(Value::Object(rects)) = v.get("rects") {
+            for (selector, rect) in rects {
+                ev.element_rects.insert(selector.clone(), rect.clone());
+            }
+        }
+        for selector in v.get("back").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+            drifted.retain(|s| s != selector);
+        }
+        // One that left the page while it was away has no box in the
+        // screenshot that follows: its earlier rect and details go, and it
+        // is transient like one the first measure did not find.
+        for selector in v.get("gone").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+            drifted.retain(|s| s != selector);
+            ev.element_rects.remove(selector);
+            ev.element_details.remove(selector);
+            if !ev.transient.iter().any(|s| s == selector) {
+                ev.transient.push(selector.to_string());
+            }
+        }
+    }
+    for selector in drifted {
+        let scan = nodes.get(&selector).and_then(Value::as_array).map(|n| Value::Array(n[1..].to_vec()));
+        let measured = ev.element_rects.get(&selector).cloned();
+        if let (Some(scan), Some(measured)) = (scan, measured) {
+            ev.element_drift.insert(selector, json!({ "scan": scan, "measured": measured }));
+        }
     }
 }
 
@@ -1602,6 +1901,54 @@ fn reveal_sweep(page: &mut Page<'_>) -> Result<(), CdpError> {
     Ok(())
 }
 
+/// A visual-contrast candidate's identity: its selector, and its match
+/// (`[n, count]`) when the selector named several elements in the capture (a
+/// repeated id), so copies sharing a selector are not taken for one another.
+#[derive(Debug, Clone, PartialEq)]
+struct CandidateKey {
+    selector: String,
+    matched: Option<Value>,
+}
+
+impl CandidateKey {
+    /// A candidate's or an analysis's key; `None` without a selector.
+    fn of(v: &Value) -> Option<CandidateKey> {
+        Some(CandidateKey {
+            selector: selector_of(v)?,
+            matched: v.get("match").filter(|m| m.is_array()).cloned(),
+        })
+    }
+
+    /// Whether this key names `selector` at `matched`. Without a match on
+    /// either side (a selector that named one element), the selector decides.
+    fn names(&self, selector: &str, matched: Option<&Value>) -> bool {
+        self.selector == selector
+            && match (&self.matched, matched) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+    }
+
+    fn names_value(&self, v: &Value) -> bool {
+        selector_of(v).is_some_and(|s| self.names(&s, v.get("match").filter(|m| m.is_array())))
+    }
+}
+
+/// The match [`impeccable_core::browser::visual`] records for a candidate on
+/// `el` (`[n, count]` among the capture's matches of `selector`), for a
+/// selector anchored on an id that names several elements; `None` otherwise.
+fn repeated_match(dom: &dyn Dom, selector: &str, el: ElId) -> Option<Value> {
+    if !selector.contains('#') {
+        return None;
+    }
+    let matches = dom.query_all(None, selector).ok()?;
+    if matches.len() < 2 {
+        return None;
+    }
+    let n = matches.iter().position(|m| *m == el)?;
+    Some(json!([n, matches.len()]))
+}
+
 /// The findings the analytic and canvas analyses give, and the routed
 /// selectors whose element verdict they replace. A selector the element pass
 /// already reported keeps that report, except where the element pass handed
@@ -1611,15 +1958,15 @@ fn reveal_sweep(page: &mut Page<'_>) -> Result<(), CdpError> {
 fn analysis_findings(
     browser_analyses: &[Value],
     existing_low_contrast: &[String],
-    routed: &[String],
-) -> (Vec<RawResult>, Vec<String>) {
-    let is_routed = |sel: Option<&str>| routed.iter().any(|s| Some(s.as_str()) == sel);
+    routed: &[CandidateKey],
+) -> (Vec<RawResult>, Vec<CandidateKey>) {
+    let is_routed = |v: &Value| routed.iter().any(|k| k.names_value(v));
     let findings = browser_analyses
         .iter()
         .filter(|r| {
             let sel = r.get("selector").and_then(Value::as_str);
             truthy(r.get("finding"))
-                && (is_routed(sel) || !existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel))
+                && (is_routed(r) || !existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel))
         })
         .filter_map(|r| r.get("finding").map(|f| (f, selector_of(r))))
         .map(|(f, selector)| RawResult {
@@ -1628,13 +1975,12 @@ fn analysis_findings(
             ..RawResult::new(origin::VISUAL_CONTRAST, js_str(f.get("id")), js_str(f.get("snippet")))
         })
         .collect();
-    let mut superseded: Vec<String> = Vec::new();
+    let mut superseded: Vec<CandidateKey> = Vec::new();
     for r in browser_analyses {
-        let sel = r.get("selector").and_then(Value::as_str);
         let resolved = matches!(r.get("status").and_then(Value::as_str), Some("fail") | Some("pass"));
-        if let Some(s) = sel.filter(|s| resolved && !s.is_empty() && is_routed(Some(s))) {
-            if !superseded.iter().any(|x| x == s) {
-                superseded.push(s.to_string());
+        if let Some(key) = CandidateKey::of(r).filter(|_| resolved && is_routed(r)) {
+            if !superseded.contains(&key) {
+                superseded.push(key);
             }
         }
     }
@@ -1652,16 +1998,16 @@ fn run_visual_contrast_fallback(
     viewport: Viewport,
     profile: Option<&DetectorProfile>,
     target: &str,
-) -> Result<(Vec<RawResult>, Vec<String>), EngineError> {
+) -> Result<(Vec<RawResult>, Vec<CandidateKey>), EngineError> {
     // Text the element pass hands over rather than scores (see
     // `visual::routed_reason`): its element verdict does not keep the pixels
     // from reading it, and the pixels' verdict replaces that one.
-    let routed: Vec<String> = browser_analyses
+    let routed: Vec<CandidateKey> = browser_analyses
         .iter()
         .filter(|a| a.get("routed").is_some_and(|r| !r.is_null()))
-        .filter_map(|a| a.get("selector").and_then(Value::as_str))
-        .map(String::from)
+        .filter_map(CandidateKey::of)
         .collect();
+    let is_routed = |v: &Value| routed.iter().any(|k| k.names_value(v));
     let existing_low_contrast: Vec<String> = serialized_groups
         .iter()
         .filter(|g| {
@@ -1686,7 +2032,7 @@ fn run_visual_contrast_fallback(
     // the candidate list; when there are none, there are none to collect.
     let candidates: &[Value] = browser_analyses;
 
-    let browser_resolved: Vec<String> = browser_analyses
+    let browser_resolved: Vec<CandidateKey> = browser_analyses
         .iter()
         .filter(|r| {
             matches!(
@@ -1694,9 +2040,7 @@ fn run_visual_contrast_fallback(
                 Some("fail") | Some("pass")
             )
         })
-        .filter_map(|r| r.get("selector").and_then(Value::as_str))
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+        .filter_map(CandidateKey::of)
         .collect();
     let filtered: Vec<&Value> = candidates
         .iter()
@@ -1705,10 +2049,13 @@ fn run_visual_contrast_fallback(
             (!existing_low_contrast
                 .iter()
                 .any(|s| Some(s.as_str()) == sel)
-                || routed.iter().any(|s| Some(s.as_str()) == sel))
-                && !browser_resolved.iter().any(|s| Some(s.as_str()) == sel)
+                || is_routed(c))
+                && !browser_resolved.iter().any(|k| k.names_value(c))
         })
         .collect();
+    // Where a clip's x 0 sits: the left edge of a right-to-left page's
+    // overflow, asked once for every candidate.
+    let origin_x = if filtered.is_empty() { 0.0 } else { screenshot_contrast::scroll_origin_x(page) };
     if !filtered.is_empty() {
         // The pixel pass reads one box twice, once with the text painted and
         // once without. A frame that advances between the two shots turns
@@ -1725,7 +2072,7 @@ fn run_visual_contrast_fallback(
     for candidate in filtered {
         let sel = candidate.get("selector").and_then(Value::as_str);
         // A read the first budget's rules would not have made.
-        let extra = routed.iter().any(|s| Some(s.as_str()) == sel)
+        let extra = is_routed(candidate)
             && (candidate.get("reasons").and_then(Value::as_array).is_some_and(|rs| {
                 rs.iter().any(|r| matches!(r.as_str(), Some("unread layer") | Some("text outline")))
             }) || existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel));
@@ -1739,6 +2086,7 @@ fn run_visual_contrast_fallback(
                 page,
                 candidate,
                 viewport.width as f64,
+                origin_x,
             )
             .map_err(cdp_err)?;
             measured = m.measured;
@@ -1765,11 +2113,9 @@ fn run_visual_contrast_fallback(
                 routed_misses += 1;
             }
         }
-        if measured {
-            if let Some(s) = sel {
-                if routed.iter().any(|r| r == s) {
-                    superseded.push(s.to_string());
-                }
+        if measured && is_routed(candidate) {
+            if let Some(key) = CandidateKey::of(candidate) {
+                superseded.push(key);
             }
         }
         findings.extend(result);
@@ -1806,11 +2152,43 @@ mod tests {
             json!({"selector": "#vector", "routed": "unread layer", "status": "unresolved"}),
         ];
         let existing: Vec<String> = ["#photo-copy", "#photo-ok", "#plain", "#vector"].iter().map(|s| s.to_string()).collect();
-        let routed: Vec<String> = ["#photo-copy", "#photo-ok", "#vector"].iter().map(|s| s.to_string()).collect();
+        let routed: Vec<CandidateKey> = analyses.iter().filter(|a| a.get("routed").is_some()).filter_map(CandidateKey::of).collect();
         let (findings, superseded) = analysis_findings(&analyses, &existing, &routed);
         let sels: Vec<&str> = findings.iter().filter_map(|f| f.selector.as_deref()).collect();
         assert_eq!(sels, vec!["#photo-copy"]);
+        let superseded: Vec<&str> = superseded.iter().map(|k| k.selector.as_str()).collect();
         assert_eq!(superseded, vec!["#photo-copy", "#photo-ok"]);
+    }
+
+    /// Two copies of a repeated id are two candidates: the copy an analysis
+    /// resolved is superseded, its unresolved twin stays routed to the
+    /// pixels, and the element pass's verdict on the twin stands.
+    #[test]
+    fn copies_of_a_repeated_id_are_settled_apart() {
+        let analyses = vec![
+            json!({"selector": "#hero > p", "match": [0, 2], "routed": "unread layer", "status": "pass"}),
+            json!({"selector": "#hero > p", "match": [1, 2], "routed": "unread layer", "status": "unresolved"}),
+        ];
+        let existing = vec!["#hero > p".to_string()];
+        let routed: Vec<CandidateKey> = analyses.iter().filter_map(CandidateKey::of).collect();
+        let (_, superseded) = analysis_findings(&analyses, &existing, &routed);
+        assert_eq!(superseded, vec![CandidateKey { selector: "#hero > p".into(), matched: Some(json!([0, 2])) }]);
+        // The unresolved copy is not taken for the resolved one.
+        assert!(!superseded[0].names_value(&analyses[1]));
+        assert!(superseded[0].names_value(&analyses[0]));
+        // A selector that named one element has no match, and the selector decides.
+        let single = CandidateKey::of(&json!({"selector": "#solo"})).unwrap();
+        assert!(single.names("#solo", Some(&json!([1, 2]))));
+
+        let verdict = |n: u64| RawResult {
+            selector: Some("#hero > p".into()),
+            ..RawResult::new(origin::VISUAL_CONTRAST, "low-contrast".into(), format!("copy {n}"))
+        };
+        let mut results = vec![verdict(0), verdict(1)];
+        let copy_of = |r: &RawResult| r.snippet.strip_prefix("copy ").and_then(|n| n.parse::<u64>().ok());
+        settle_handed_over(&mut results, &superseded, |r| copy_of(r).map(|n| json!([n, 2])));
+        let left: Vec<(&str, &str)> = results.iter().map(|r| (r.snippet.as_str(), r.severity.as_str())).collect();
+        assert_eq!(left, vec![("copy 1", "advisory")]);
     }
 
     #[test]
@@ -1850,7 +2228,7 @@ mod tests {
             result(origin::SCAN, "low-contrast", "#scored", ""),
             result(origin::SCAN, "tiny-text", "#unread", ""),
         ];
-        settle_handed_over(&mut results, &["#read".to_string()]);
+        settle_handed_over(&mut results, &[CandidateKey { selector: "#read".into(), matched: None }], |_| None);
         let summary: Vec<(&str, &str, &str)> =
             results.iter().map(|r| (r.origin, r.snippet.as_str(), r.severity.as_str())).collect();
         assert_eq!(

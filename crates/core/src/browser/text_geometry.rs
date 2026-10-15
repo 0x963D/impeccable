@@ -294,7 +294,8 @@ pub fn rides_a_running_track(dom: &dyn Dom, el: ElId) -> bool {
 /// `none` whose own `infinite` iteration count (the lists pair by position,
 /// the shorter one repeating) sits on keyframes that move it (`transform` or
 /// `translate`), or on keyframes the capture could not read. A one-shot
-/// slide beside an endless fade or pulse is not a moving track.
+/// slide beside an endless fade or pulse is not a moving track, and neither
+/// is an endless pulse whose transform only scales the box in place.
 fn runs_endless_animation(dom: &dyn Dom, el: ElId) -> bool {
     let counts_raw = dom.style(el, "animationIterationCount");
     let counts: Vec<&str> = counts_raw.split(',').map(js::trim).collect();
@@ -308,8 +309,10 @@ fn runs_endless_animation(dom: &dyn Dom, el: ElId) -> bool {
             && counts[i % counts.len()] == "infinite"
             && dom.keyframes(name).is_none_or(|frames| {
                 frames.iter().any(|f| {
-                    f.decls.iter().any(|(p, _)| {
-                        matches!(p.strip_prefix("-webkit-").unwrap_or(p), "transform" | "translate")
+                    f.decls.iter().any(|(p, v)| match p.strip_prefix("-webkit-").unwrap_or(p) {
+                        "translate" => true,
+                        "transform" => !crate::checks::css_scan::transform_only_scales(v),
+                        _ => false,
                     })
                 })
             })
@@ -417,6 +420,35 @@ pub fn phrasing_holds_break(dom: &dyn Dom, el: ElId) -> bool {
 mod tests {
     use super::*;
     use crate::browser::fake_dom::FakeDom;
+
+    /// review of #947: a scale-only infinite pulse leaves the box where it
+    /// is, so it is no moving track; a translate, or a transform that moves
+    /// as well as scales, is.
+    #[test]
+    fn an_endless_scale_pulse_is_not_a_moving_track() {
+        use crate::browser::dom::KeyframeFrame;
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let track = d.add(Some(body), "div");
+        d.set_styles(track, &[("animationName", "beat"), ("animationIterationCount", "infinite")]);
+        let frames = |decls: &[(&str, &str)]| {
+            vec![KeyframeFrame { decls: decls.iter().map(|(p, v)| (p.to_string(), v.to_string())).collect() }]
+        };
+        d.keyframes.insert("beat".into(), frames(&[("transform", "scale(1.05)")]));
+        assert!(!runs_endless_animation(&d, track), "scale pulse");
+        d.keyframes.insert("beat".into(), frames(&[("-webkit-transform", "scaleX(0.9) scaleY(1.1)")]));
+        assert!(!runs_endless_animation(&d, track), "two-axis scale pulse");
+        d.keyframes.insert("beat".into(), frames(&[("transform", "translateX(-50%)")]));
+        assert!(runs_endless_animation(&d, track), "a sliding track");
+        d.keyframes.insert("beat".into(), frames(&[("transform", "scale(1.05) translateX(-10px)")]));
+        assert!(runs_endless_animation(&d, track), "scale plus a move");
+        d.keyframes.insert("beat".into(), frames(&[("transform", "scale(var(--s))")]));
+        assert!(runs_endless_animation(&d, track), "an unreadable value");
+        d.keyframes.insert("beat".into(), frames(&[("translate", "-100% 0")]));
+        assert!(runs_endless_animation(&d, track), "the translate property");
+        d.keyframes.remove("beat");
+        assert!(runs_endless_animation(&d, track), "unread keyframes");
+    }
 
     #[test]
     fn phrasing_extent_unions_inline_children_and_stops_at_blocks() {

@@ -87,13 +87,14 @@ fn closed_interface_is_left_out_of_the_hidden_share() {
     let hidden = of(&closed, "content-hidden-at-rest");
     assert!(hidden.is_empty(), "{hidden:#?}");
 
-    // The same closed interface beside three stalled reveals: one finding,
-    // counting the stalled text alone and quoting it.
+    // The same closed interface beside three stalled reveals and a tab panel
+    // its tab marks selected whose reveal failed: one finding, counting that
+    // text alone and quoting it.
     let stalled = scan(&engine, port, "content-hidden-at-rest.html");
     let hidden: Vec<&str> = of(&stalled, "content-hidden-at-rest").iter().map(|f| f.snippet.as_str()).collect();
     assert_eq!(
         hidden,
-        vec!["50% of page text (580 of 1162 chars) stays at opacity 0 / visibility hidden after reveal handlers ran (e.g. \"Hours of work, done in minutes\")"]
+        vec!["52% of page text (629 of 1216 chars) stays at opacity 0 / visibility hidden after reveal handlers ran (e.g. \"Hours of work, done in minutes\")"]
     );
 }
 

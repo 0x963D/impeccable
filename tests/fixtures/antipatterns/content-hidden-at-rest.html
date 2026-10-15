@@ -84,6 +84,13 @@
         <p>A third staged block. Together the three carry more than a third of the text the
         page shows or was meant to show, which is the share the rule reports.</p>
       </div>
+      <!-- FLAG: the tab panel its tab marks selected, hidden because its reveal failed -->
+      <div role="tablist">
+        <button role="tab" aria-selected="true" aria-controls="panel-plans">Plans</button>
+      </div>
+      <div class="panels">
+        <div role="tabpanel" id="panel-plans" class="unselected">The selected plans panel never showed its prices.</div>
+      </div>
     </section>
     <section class="column">
       <h2>Should pass: closed interface, left out</h2>

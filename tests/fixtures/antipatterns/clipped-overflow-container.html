@@ -102,6 +102,11 @@
         <button>Sort</button>
         <div class="empty-menu" role="menu"></div>
       </div>
+      <!-- An open native dialog is a dialog without role="dialog". -->
+      <div class="box flag-native-dialog" style="overflow: hidden">
+        <button>Share</button>
+        <dialog open class="pop native-dialog" style="margin: 0; border: 0">Native dialog clipped by the hidden ancestor.</dialog>
+      </div>
       <!-- A BEM element name that names no track still reports. -->
       <div class="box hero__panel flag-bem-tooltip" style="overflow: hidden">
         <button>Details</button>
@@ -208,6 +213,16 @@
       <div class="box pass-masthead-curve" style="overflow: hidden">
         <h3>Curved masthead</h3>
         <span class="pop" style="top: 60%; left: -20px; width: 260px; height: 120px; border-radius: 50%">Spring collection</span>
+      </div>
+      <div class="box pass-closed-dialog" style="overflow: hidden">
+        <button>Share</button>
+        <dialog class="pop closed-dialog">A closed dialog renders nothing.</dialog>
+      </div>
+      <!-- A modal dialog sits in the top layer, above the clip. -->
+      <div class="box pass-modal-dialog" style="overflow: hidden">
+        <button>Share</button>
+        <dialog class="pop modal-dialog" id="modal-dialog" style="margin: 0; border: 0">A modal dialog escapes every clip.</dialog>
+        <script>document.getElementById('modal-dialog').showModal();</script>
       </div>
       <div class="box pass-unnamed-dropdown" style="overflow: hidden">
         <button>Sort</button>

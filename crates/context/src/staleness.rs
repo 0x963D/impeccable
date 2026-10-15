@@ -35,8 +35,8 @@ pub fn finding(id: &str, artifact: &str, path: Option<String>, severity: &'stati
     Finding { id: id.to_string(), artifact: artifact.to_string(), path, severity, summary, fix }
 }
 
-const KNOWN_CONFIG_KEYS: [&str; 9] =
-    ["hook", "detector", "updateCheck", "stalenessCheck", "projectRoots", "buildPath", "browser", "$schema", "version"];
+const KNOWN_CONFIG_KEYS: [&str; 10] =
+    ["hook", "detector", "updateCheck", "stalenessCheck", "projectRoots", "buildPath", "browser", "telemetry", "$schema", "version"];
 const BUILD_PATH_VALUES: [&str; 2] = ["comp", "code"];
 const DIRECTION_WORK_PATHS: [&str; 2] = [".impeccable/surfaces", ".impeccable/mocks/decision"];
 const KNOWN_DETECTOR_KEYS: [&str; 5] = ["ignoreRules", "ignoreFiles", "ignoreValues", "designSystem", "extensions"];
@@ -395,8 +395,8 @@ pub fn check_build_path_unset(project_root: &str, repo_root: Option<&str>, produ
         "config.json",
         Some(".impeccable/config.json".to_string()),
         "mention",
-        "This project has run visual direction work but records no `buildPath`, so every direction round takes the comp-first default without anyone having chosen it.".to_string(),
-        "Only when image generation exists in your tool surface, offer the choice once: **comp-first** (an image sets the bar before any code; bolder composition, slower) or **code-first** (build directly; ambition carried by the direction contract; leaner, faster). Write the answer to `.impeccable/config.json` as `\"buildPath\": \"comp\"` or `\"buildPath\": \"code\"`, merging with the keys already there. Without image generation there is no choice to record: stay silent.".to_string(),
+        "This project has run visual direction work but records no `buildPath`, so Persuade and Experience rounds take the comp-first default without anyone having chosen it.".to_string(),
+        "Only when image generation exists in your tool surface, offer the choice once, saying it covers landing pages and showcase surfaces (app screens and documents build code-first either way): **comp-first** (an image sets the bar before any code; bolder composition, slower) or **code-first** (build directly; ambition carried by the direction contract; leaner, faster). Write the answer to `.impeccable/config.json` as `\"buildPath\": \"comp\"` or `\"buildPath\": \"code\"`, merging with the keys already there. Without image generation there is no choice to record: stay silent.".to_string(),
     )]
 }
 

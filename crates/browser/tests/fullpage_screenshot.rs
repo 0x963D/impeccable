@@ -4,7 +4,8 @@
 //! - A tall document paints to its foot, and a wide one to its right edge.
 //! - A page whose body scrolls (the document is one viewport tall) is
 //!   captured by scrolling the body, and the pixel contrast pass reads the
-//!   text below its fold.
+//!   text below its fold. A footer under a 100vh shell that scrolls its own
+//!   frame follows the frame's content.
 //! - Rows a feed renders only once they are scrolled to appear in the
 //!   screenshot.
 //! - An element past the screenshot cut gets a viewport shot of its own.
@@ -503,4 +504,67 @@ fn a_shell_inside_a_body_margin_is_captured_by_scrolling_the_shell() {
     // The marker under the shell's 3000px of content, 8px down for the margin.
     let p = img.get_pixel(40, 8 + 3000 + 30).0;
     assert!(p[1] > 90 && p[0] < 60 && p[2] < 110, "the marker below the fold is missing: {p:?}");
+}
+
+/// A 100vh app shell that scrolls its own frame, with a footer below it, so
+/// the document scrolls the footer's height: under a quarter viewport, so
+/// the frame is captured, and the footer has to follow the frame's content.
+/// Served inline, like the margin shell.
+const SHELL_FOOTER_PAGE: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Shell footer</title>
+<style>
+  body { margin: 0; background: #ffffff; }
+  .shell { height: 100vh; overflow: auto; }
+  .content { height: 3000px; background: #ffffff; }
+  .footer { height: 150px; background: #0a7d3b; }
+</style></head>
+<body>
+  <div class="shell"><div class="content"></div></div>
+  <div class="footer"></div>
+</body></html>"#;
+
+#[test]
+fn a_footer_under_a_scrolled_shell_reaches_the_screenshot() {
+    let Some(engine) = engine() else { return };
+    let port = serve_page(SHELL_FOOTER_PAGE);
+    let options = ScanOptions {
+        viewport: Some((1280, 800)),
+        ..Default::default()
+    };
+    let mut browser = engine.launch().expect("launch");
+    let url = format!("http://127.0.0.1:{port}/");
+    let (_, evidence) = detect_url_evidence(&mut browser, &url, &options, "load", 100, &EvidenceRequest::default())
+        .expect("evidence scan");
+    browser.close();
+    let shot = evidence.screenshot.as_ref().expect("screenshot");
+    assert_eq!(shot.method, impeccable_browser::fullpage::method::STITCHED);
+    assert!(shot.height >= 3140.0, "{}", shot.height);
+    let img = decode(&shot.jpeg_base64);
+    // The shell's content is white to its foot; the footer follows it.
+    let p = img.get_pixel(40, 2900).0;
+    assert!(p[0] > 200 && p[1] > 200, "the shell's content is not white: {p:?}");
+    let p = img.get_pixel(40, 3075).0;
+    assert!(p[1] > 90 && p[0] < 60 && p[2] < 110, "the footer below the shell is missing: {p:?}");
+}
+
+fn serve_page(body: &'static str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        // One thread per connection, so an idle connection the browser opens
+        // ahead of its request never holds up the one that asks.
+        for mut stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let head = format!(
+                    "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            });
+        }
+    });
+    port
 }

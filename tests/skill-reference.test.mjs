@@ -14,7 +14,8 @@ describe('skill reference authoring contracts', () => {
     assert.match(recordDecision, /development-only contract/);
     assert.match(recordDecision, /under `## Direction contract` in the relevant surface brief/);
     assert.match(recordDecision, /read the brief once more/i);
-    assert.match(recordDecision, /all six contract blocks and the seed key/);
+    assert.match(recordDecision, /all six contract blocks and the seed reference/);
+    assert.match(recordDecision, /SEED REFERENCE concept-seed printed .*never the raw seed key/);
 
     for (const block of ['THESIS', 'OWN-WORLD', 'STORY', 'FIRST VIEWPORT', 'FORM', 'FINISH']) {
       assert.match(recordDecision, new RegExp(`${block}:`));
@@ -110,6 +111,22 @@ describe('skill reference authoring contracts', () => {
     assert.match(edgeCases, /\*\*Interrupted gestures\*\*[\s\S]*works without a reload/);
     assert.match(edgeCases, /clear the dragging state and release capture/);
     assert.match(verifyHardening, /\*\*Interrupted gestures\*\*/);
+  });
+
+  it('keeps audit score-table dimensions aligned with their numbered sections', () => {
+    for (const filename of ['audit.md', 'audit.native.md']) {
+      const audit = readFileSync(join(ROOT, `skill/reference/${filename}`), 'utf-8').replace(/\r\n?/g, '\n');
+      const sections = [...audit.matchAll(/^### ([1-5])\. (.+?)(?: \([^\n]+\))?$/gm)].map((match) => [
+        match[1],
+        match[2],
+      ]);
+      const scores = [...audit.matchAll(/^\| ([1-5]) \| ([^|]+?) \|/gm)].map((match) => [
+        match[1],
+        match[2].trim(),
+      ]);
+
+      assert.deepEqual(scores, sections, filename);
+    }
   });
 });
 

@@ -180,8 +180,8 @@ fn clipped_overflow_reads_track_words_past_bem_and_camel_case() {
     assert_marks(
         &findings,
         "clipped-overflow-container",
-        &["flag-bem-tooltip", "flag-overflow-hidden"],
-        &["pass-bem-marquee", "hotStuffBox", "pass-camel-host", "pass-nested-deck"],
+        &["flag-bem-tooltip", "flag-overflow-hidden", "flag-native-dialog"],
+        &["pass-bem-marquee", "hotStuffBox", "pass-camel-host", "pass-nested-deck", "pass-closed-dialog", "pass-modal-dialog"],
     );
 }
 

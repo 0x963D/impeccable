@@ -3,7 +3,8 @@
 //!
 //! - Shadow trees are extra to the element budget: a page whose light DOM
 //!   fits still captures, and a tree that would cross the budget is left out.
-//! - A running animation inside a shadow tree is recorded on its element.
+//! - A running animation inside a shadow tree is recorded on its element,
+//!   and so are its `:disabled` and `:checked` states.
 //! - An app shell that scrolls a frame inside a shadow root is captured by
 //!   scrolling that frame.
 
@@ -104,6 +105,75 @@ fn shadow_trees_never_push_a_page_past_the_element_budget() {
         fading.iter().any(|an| an.as_array().unwrap().iter().any(|p| p == "opacity")),
         "the shadow-tree animation was not recorded: {out}"
     );
+    page.close();
+    browser.close();
+}
+
+const SHADOW_STATES_PAGE: &str = r#"<!doctype html><html><body>
+<button id="light-button" disabled>Light</button>
+<div id="host"></div>
+<script>
+  const outer = document.getElementById('host').attachShadow({ mode: 'open' });
+  outer.innerHTML = '<button disabled>Shadow</button><input type="checkbox" checked><section></section>';
+  const inner = outer.querySelector('section').attachShadow({ mode: 'open' });
+  inner.innerHTML = '<input type="radio" checked disabled>';
+</script>
+</body></html>"#;
+
+/// review of #942: `:disabled` and `:checked` states inside open shadow
+/// trees, nested ones included, are recorded like light-DOM states.
+#[test]
+fn pseudo_class_states_inside_shadow_trees_are_recorded() {
+    let Some(mut browser) = browser() else { return };
+    let port = serve(SHADOW_STATES_PAGE);
+    let mut page = browser.new_page().unwrap();
+    page.goto(&format!("http://127.0.0.1:{port}/"), "load", Duration::from_secs(15))
+        .unwrap();
+    snapshot_engine::ensure_snapshot_js(&mut page).unwrap();
+    let out = page
+        .evaluate_value(
+            "(() => { const c = window.__impeccableSnapshot.capture({}); if (c.error) return { error: c.error }; const s = JSON.parse(c.json); return s.els.filter(e => e.t === 'BUTTON' || e.t === 'INPUT').map(e => [e.t, e.st || []]); })()",
+        )
+        .unwrap();
+    assert!(out.get("error").is_none(), "{out}");
+    let rows: Vec<(String, Vec<String>)> = serde_json::from_value(out.clone()).unwrap();
+    let has = |tag: &str, state: &str| rows.iter().filter(|(t, st)| t == tag && st.iter().any(|s| s == state)).count();
+    assert_eq!(has("BUTTON", "disabled"), 2, "{out}");
+    assert_eq!(has("INPUT", "checked"), 2, "{out}");
+    assert_eq!(has("INPUT", "disabled"), 1, "{out}");
+    page.close();
+    browser.close();
+}
+
+/// The in-page probe the live overlay's rule core reads the page through.
+const PROBE_JS: &str = include_str!("../../../browser-bundle/10-probe.js");
+
+const SHADOW_DECK_PAGE: &str = r#"<!doctype html><html><body>
+<deck-carousel id="deck"></deck-carousel>
+<div id="plain"><p>Light</p></div>
+<script>
+  const root = document.getElementById('deck').attachShadow({ mode: 'open' });
+  root.innerHTML = '<style>.track{display:flex}</style><div class="track"><h3>Slide one</h3></div>';
+  document.getElementById('plain').attachShadow({ mode: 'closed' }).innerHTML = '<p>Closed</p>';
+</script>
+</body></html>"#;
+
+/// review of #948: the live page's probe lists the top-level elements of an
+/// open shadow tree, so heading-rhythm does not read a shadow-DOM carousel
+/// as an empty spacer in live and extension scans. A closed tree lists none.
+#[test]
+fn the_page_probe_lists_open_shadow_children() {
+    let Some(mut browser) = browser() else { return };
+    let port = serve(SHADOW_DECK_PAGE);
+    let mut page = browser.new_page().unwrap();
+    page.goto(&format!("http://127.0.0.1:{port}/"), "load", Duration::from_secs(15))
+        .unwrap();
+    let script = format!(
+        "(() => {{ {PROBE_JS}\n const kids = id => __impeccableDom.shadow_children(__intern(document.getElementById(id))).map(h => __el(h).tagName); return {{ deck: kids('deck'), plain: kids('plain') }}; }})()"
+    );
+    let out = page.evaluate_value(&script).unwrap();
+    assert_eq!(out["deck"], serde_json::json!(["STYLE", "DIV"]), "{out}");
+    assert_eq!(out["plain"], serde_json::json!([]), "{out}");
     page.close();
     browser.close();
 }

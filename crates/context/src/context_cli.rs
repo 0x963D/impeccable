@@ -171,7 +171,7 @@ pub fn recorded_build_path(ctx: &Ctx, cwd: &str) -> Option<(String, String)> {
 
 fn append_build_path_directive(parts: &mut Vec<String>, ctx: &Ctx, cwd: &str) {
     if let Some((value, source)) = recorded_build_path(ctx, cwd) {
-        parts.push(format!("BUILD_PATH_DEFAULT: {} (from {}). Author direction and surface rounds with this as buildPath.value and toggle: true; a flip on the page binds that session only and is never written back, because a default is already recorded here. New-work's one-time offer to record a flipped value applies only where no default exists, which is why you are not seeing this line on those projects.", value, source));
+        parts.push(format!("BUILD_PATH_DEFAULT: {} (from {}). Author Persuade and Experience direction and surface rounds with this as buildPath.value and toggle: true; Operate and Read surfaces are code-led whatever is recorded here, and concept-seed prints the path for each surface. A flip on the page binds that session only and is never written back, because a default is already recorded here. New-work's one-time offer to record a flipped value applies only where no default exists, which is why you are not seeing this line on those projects.", value, source));
     }
 }
 
@@ -366,7 +366,7 @@ static VERSION_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^version:\s*(.+?)\s*$
 /// Codex's validator rejects unknown top-level keys, so the Codex and
 /// `.agents` skills carry `version` under the spec-defined `metadata:` map
 /// (#703). A metadata version wins; a legacy top-level one still reads.
-fn parse_skill_frontmatter_version(content: &str) -> Option<String> {
+pub(crate) fn parse_skill_frontmatter_version(content: &str) -> Option<String> {
     let caps = FRONTMATTER_RE.captures(content)?;
     let body = caps.get(1)?.as_str();
 
@@ -427,7 +427,7 @@ fn strip_matched_quotes(v: &str) -> String {
     v.to_string()
 }
 
-fn read_local_skill_version(provider: &Provider) -> Option<String> {
+pub(crate) fn read_local_skill_version(provider: &Provider) -> Option<String> {
     let p = provider.skill_md_path()?;
     let content = safe_read(&p)?;
     parse_skill_frontmatter_version(&content)

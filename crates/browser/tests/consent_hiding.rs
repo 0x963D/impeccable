@@ -21,6 +21,12 @@
 //!   is refused; a short page under a shadow-root banner, or one appended
 //!   outside <body>, is scanned, as is a page whose late banner closed
 //!   itself; a late banner on a root the first pass hid inline is reported.
+//! - A form two web components down counts as the page; a late banner its
+//!   manager closed by rewriting its style to the stamped
+//!   `display: none !important` stays closed; dialogs a fixed layer parks
+//!   past the viewport, or a collapsed wrapper clips away, are not showing,
+//!   while a fixed bar a transformed ancestor holds below the fold is; and a
+//!   banner that arrives during the scroll probe is hidden after it.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -454,4 +460,90 @@ fn a_frame_in_the_managers_shadow_root_is_a_wall() {
     let url = format!("http://127.0.0.1:{port}/shadow-frame-wall.html");
     let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a framed consent wall must not scan");
     assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager Sourcepoint, "), "{}", err.message);
+}
+
+#[test]
+fn a_form_in_a_nested_web_component_under_a_banner_is_scanned() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/shadow-nested-form-page.html");
+    engine
+        .detect_url_scan(&url, &ScanOptions::default())
+        .expect("a form two shadow roots down is the page");
+}
+
+#[test]
+fn a_late_banner_closed_with_the_stamped_value_is_not_a_wall() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/late-closed-attr-banner.html");
+    engine
+        .detect_url_scan(&url, &ScanOptions::default())
+        .expect("a banner its manager closed with display: none !important leaves the page");
+}
+
+#[test]
+fn closed_dialogs_parked_offscreen_or_clipped_are_not_showing() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/parked-banner-page.html");
+    let mut browser = engine.launch().expect("launch");
+    let (_, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("a page whose consent dialogs are parked away is not a wall");
+    browser.close();
+    assert_eq!(evidence.validity.as_ref().unwrap().to_value()["status"], "ok");
+    assert!(evidence.consent.as_ref().expect("consent report").hidden.is_empty());
+}
+
+#[test]
+fn a_banner_the_scroll_probe_brings_in_is_hidden() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/after-scroll-probe-banner.html");
+    let scan = engine.detect_url_scan(&url, &ScanOptions::default()).expect("scan");
+    assert!(
+        scan.notes.iter().any(|n| n.starts_with("Hid the OneTrust consent banner")),
+        "{:?}",
+        scan.notes
+    );
+}
+
+#[test]
+fn a_fixed_banner_a_transformed_ancestor_holds_is_showing() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/held-fixed-banner.html");
+    let mut browser = engine.launch().expect("launch");
+    let (_, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("scan");
+    browser.close();
+    assert_eq!(evidence.consent.as_ref().expect("consent report").hidden, vec!["OneTrust"]);
+}
+
+/// Tealium's prompt (telekom.de) and Transcend's banner in a shadow root on a
+/// zero-size host (verizon.com) are hidden by their vendors' own ids.
+#[test]
+fn tealium_and_transcend_banners_are_hidden() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    for (page, name) in [("tealium.html", "Tealium"), ("transcend.html", "Transcend")] {
+        let url = format!("http://127.0.0.1:{port}/{page}");
+        let scan = engine.detect_url_scan(&url, &ScanOptions::default()).expect("scan");
+        let found = flagged(&scan.findings);
+        assert!(has(&found, "low-contrast", "#covered-copy"), "{page}: {found:#?}");
+        assert!(has(&found, "low-contrast", "#covered-cta"), "{page}: {found:#?}");
+        for f in &scan.findings {
+            assert_eq!(f.extras.get("consentHidden"), Some(&serde_json::json!([name])), "{page}: {f:?}");
+        }
+        assert!(!has(&found, "low-contrast", "#utiqMessage"), "{page}: {found:#?}");
+        let kept = engine.detect_url_scan(&url, &KEEP).expect("scan");
+        assert!(kept.findings.iter().all(|f| f.extras.get("consentHidden").is_none()));
+        assert!(kept.notes.is_empty());
+        if page == "tealium.html" {
+            // Kept, the prompt's own faint text is scored as the page's.
+            assert!(has(&flagged(&kept.findings), "low-contrast", "#utiqMessage"), "{:#?}", kept.findings);
+        }
+    }
 }

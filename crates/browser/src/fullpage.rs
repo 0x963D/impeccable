@@ -75,10 +75,13 @@ pub struct Scroller {
 
 impl Scroller {
     /// The page's height with this scroller unrolled: its content from where
-    /// the rects were measured, plus whatever sits below its box.
-    pub fn unrolled_height(&self, viewport_height: f64) -> f64 {
+    /// the rects were measured, plus whatever sits below its box, to the
+    /// viewport's foot or, when the document scrolls a little further (a
+    /// footer under a 100vh shell), to the document's.
+    pub fn unrolled_height(&self, viewport_height: f64, document_height: f64) -> f64 {
         let box_bottom = self.top + self.client_height;
-        self.top + self.scroll_height - self.scroll_top + (viewport_height - box_bottom).max(0.0)
+        let foot = viewport_height.max(document_height);
+        self.top + self.scroll_height - self.scroll_top + (foot - box_bottom).max(0.0)
     }
 
     /// The viewport rows it shows, `[top, bottom)`.
@@ -229,11 +232,11 @@ const GEOMETRY_JS: &str = r#"(() => {
   return out;
 })()"#;
 
-const SCROLL_TO_JS: &str = r#"(async ({ x, y, useScroller, hideFixed }) => {
+const SCROLL_TO_JS: &str = r#"(async ({ x, y, useScroller, hideFixed, docY }) => {
   const el = useScroller ? window.__impeccableShotScroller : null;
   if (useScroller && !el) throw new Error('the page scroller is gone');
   if (el) {
-    window.scrollTo({ left: x, top: 0, behavior: 'instant' });
+    window.scrollTo({ left: x, top: docY || 0, behavior: 'instant' });
     el.scrollTo({ left: el.scrollLeft, top: y, behavior: 'instant' });
   } else {
     window.scrollTo({ left: x, top: y, behavior: 'instant' });
@@ -244,6 +247,7 @@ const SCROLL_TO_JS: &str = r#"(async ({ x, y, useScroller, hideFixed }) => {
   const pos = {
     x: window.scrollX,
     y: el ? el.scrollTop : window.scrollY,
+    docY: window.scrollY,
     maxY: el ? el.scrollHeight - el.clientHeight : se.scrollHeight - window.innerHeight,
   };
   // Every element under body, open shadow trees included: chrome a widget
@@ -339,11 +343,21 @@ const RESTORE_JS: &str = r#"(({ scrollTop }) => {
   if (el) el.scrollTo({ left: el.scrollLeft, top: scrollTop, behavior: 'instant' });
 })"#;
 
-/// The element a flagged selector names. `identity` is `[n, count]` when the
-/// scan's capture matched the selector on `count` elements and flagged the
-/// `n`th (a repeated id): while the page still has `count` matches, the `n`th.
-/// Otherwise, and with no identity, `querySelector`'s answer.
-pub const RESOLVE_FLAGGED_JS: &str = r#"((selector, identity) => {
+/// The element a flagged selector names. `node` is the flagged element's id
+/// in the scan's capture, when the scan knows it: while that element is
+/// still in the document (the capture keeps it as `window.__impCap`), it is
+/// the answer, wherever the selector now points (a class a typing animation
+/// moved to the next span, a selector that matches a carousel's clones).
+/// Otherwise `identity` is `[n, count]` when the scan's capture matched the
+/// selector on `count` elements and flagged the `n`th (a repeated id): while
+/// the page still has `count` matches, the `n`th. Otherwise, and with neither,
+/// `querySelector`'s answer.
+pub const RESOLVE_FLAGGED_JS: &str = r#"((selector, identity, node) => {
+  if (typeof node === 'number' && node > 0) {
+    const cap = window.__impCap;
+    const el = cap && cap.elements ? cap.elements[node] : null;
+    if (el && el.isConnected) return el;
+  }
   if (Array.isArray(identity)) {
     const all = document.querySelectorAll(selector);
     if (all.length === identity[1]) return all[identity[0]] || null;
@@ -351,10 +365,10 @@ pub const RESOLVE_FLAGGED_JS: &str = r#"((selector, identity) => {
   return document.querySelector(selector);
 })"#;
 
-const ELEMENT_INTO_VIEW_JS: &str = r#"(async (resolve, { selector, identity, reuse, mayScroll }) => {
+const ELEMENT_INTO_VIEW_JS: &str = r#"(async (resolve, { selector, identity, node, reuse, mayScroll }) => {
   let el;
   try {
-    el = resolve(selector, identity);
+    el = resolve(selector, identity, node);
   } catch (e) {
     return null;
   }
@@ -424,7 +438,7 @@ fn capture_with(
     if let Some(scroller) = geometry.scroller {
         let document_height = geometry
             .document_height
-            .max(scroller.unrolled_height(geometry.viewport_height))
+            .max(scroller.unrolled_height(geometry.viewport_height, geometry.document_height))
             .round();
         let height = document_height.min(max_height).max(1.0);
         if let Ok(img) = stitch(page, geometry, Some(scroller), width, height) {
@@ -656,6 +670,39 @@ fn stitch(
                 }
             }
             if at_bottom || row_y - origin + band_bottom >= height {
+                // The scroller is at its foot. A document that scrolls a
+                // little further than the viewport (a footer under a 100vh
+                // shell) still holds rows below it: scroll the document by
+                // that much, the scroller kept where it is, and paste the
+                // rows that come into view under the last tile.
+                let document_extra = (geometry.document_height - vh).round();
+                if use_scroller && at_bottom && document_extra >= 1.0 {
+                    for &tx in &xs {
+                        let args = json!({
+                            "x": geometry.capture_origin_x() + tx,
+                            "y": row_y,
+                            "useScroller": true,
+                            "hideFixed": true,
+                            "docY": document_extra,
+                        });
+                        let pos = page.evaluate_value(&format!("({SCROLL_TO_JS})({args})"))?;
+                        let sx = pos.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+                        let sy = pos.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+                        let wy = pos.get("docY").and_then(Value::as_f64).unwrap_or(0.0).round();
+                        if wy < 1.0 || (sy - row_y).abs() >= 1.0 {
+                            break;
+                        }
+                        let tile = decode_png(&page.screenshot_viewport_png()?)
+                            .ok_or_else(|| CdpError::new("could not decode a viewport tile"))?;
+                        if tile.width() != vw.round() as u32 || tile.height() != vh.round() as u32 {
+                            return Err(CdpError::new("a viewport tile does not match the viewport"));
+                        }
+                        paste(&mut canvas, &tile, sx - geometry.capture_origin_x(), sy - origin + wy, (vh - wy, vh));
+                        if sx - geometry.capture_origin_x() + 0.5 < tx {
+                            break;
+                        }
+                    }
+                }
                 break;
             }
             previous = Some(row_y);
@@ -691,13 +738,15 @@ pub fn needs_element_shot(rect: &[f64], origin_x: f64, shot_width: f64, shot_hei
 /// A viewport shot per flagged element past the screenshot, the element
 /// scrolled into view first. An element that stays clipped away gets none, and
 /// failures skip that element: the findings stand without the picture.
-/// `identities` names which match of a repeated selector the scan flagged
-/// ([`RESOLVE_FLAGGED_JS`]).
+/// `identities` names which match of a repeated selector the scan flagged,
+/// and `nodes` the flagged element itself (`selector: [id, x, y, width,
+/// height]`, its id in the scan's capture first; [`RESOLVE_FLAGGED_JS`]).
 #[allow(clippy::too_many_arguments)]
 pub fn capture_element_shots(
     page: &mut Page<'_>,
     rects: &Map<String, Value>,
     identities: &Map<String, Value>,
+    nodes: &Map<String, Value>,
     origin_x: f64,
     shot_width: f64,
     shot_height: f64,
@@ -722,6 +771,7 @@ pub fn capture_element_shots(
         let args = json!({
             "selector": selector,
             "identity": identities.get(selector).cloned().unwrap_or(Value::Null),
+            "node": nodes.get(selector).and_then(|n| n.get(0)).cloned().unwrap_or(Value::Null),
             "reuse": last.is_some(),
             "mayScroll": captures < MAX_ELEMENT_SHOTS,
         });
@@ -880,10 +930,13 @@ mod tests {
         assert_eq!(tile_rows(Some(&s), 844.0, true, false), (0.0, 800.0));
         assert_eq!(tile_rows(Some(&s), 844.0, false, false), (100.0, 800.0));
         assert_eq!(tile_rows(Some(&s), 844.0, false, true), (100.0, 844.0));
-        assert_eq!(s.unrolled_height(844.0), 100.0 + 5000.0 + 44.0);
+        assert_eq!(s.unrolled_height(844.0, 844.0), 100.0 + 5000.0 + 44.0);
+        // A document 150px taller than the viewport (a footer under the
+        // shell) adds its rows below the bar.
+        assert_eq!(s.unrolled_height(844.0, 994.0), 100.0 + 5000.0 + 44.0 + 150.0);
         // Rects measured with the scroller at 300 start 300px earlier.
         let scrolled = Scroller { scroll_top: 300.0, ..s };
-        assert_eq!(scrolled.unrolled_height(844.0), 100.0 + 4700.0 + 44.0);
+        assert_eq!(scrolled.unrolled_height(844.0, 844.0), 100.0 + 4700.0 + 44.0);
         // A body scroller as tall as the viewport.
         let body = Scroller {
             top: 0.0,
@@ -891,7 +944,7 @@ mod tests {
             scroll_height: 6990.0,
             scroll_top: 0.0,
         };
-        assert_eq!(body.unrolled_height(844.0), 6990.0);
+        assert_eq!(body.unrolled_height(844.0, 844.0), 6990.0);
         assert_eq!(tile_rows(Some(&body), 844.0, false, false), (0.0, 844.0));
     }
 

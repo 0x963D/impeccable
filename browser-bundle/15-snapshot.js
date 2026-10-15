@@ -20,9 +20,10 @@
 // crates/core/src/browser/snapshot.rs (cargo xtask bundle checks the two
 // lists agree).
 const __SNAP_STYLE_PROPS = [
-  "animationIterationCount", "animationName", "animationTimeline", "animationTimingFunction",
+  "animationComposition", "animationDelay", "animationDirection", "animationDuration", "animationFillMode",
+  "animationIterationCount", "animationName", "animationPlayState", "animationTimeline", "animationTimingFunction",
   "aspectRatio", "backdropFilter", "backfaceVisibility", "background", "backgroundClip",
-  "backgroundColor", "backgroundImage", "backgroundPosition", "backgroundSize",
+  "backgroundColor", "backgroundImage", "backgroundPosition", "backgroundRepeat", "backgroundSize",
   "blockSize", "borderBottomColor", "borderBottomWidth", "borderBottomStyle",
   "borderLeftColor", "borderLeftWidth", "borderLeftStyle", "borderRadius",
   "borderRightColor", "borderRightWidth", "borderRightStyle",
@@ -426,7 +427,10 @@ function __snapLinkedStylesheetText() {
 
 // Every @keyframes rule, in document.styleSheets order (nested rules walked
 // breadth-first like 10-probe.js keyframes()); first rule per name wins.
-function __snapKeyframes() {
+// `keysOut`, when given, receives `[name, [keyText, ...]]` per rule, one
+// selector per recorded frame, so a reader knows which offsets each frame
+// sets.
+function __snapKeyframes(keysOut) {
   const out = [];
   const seen = new Set();
   for (const sheet of document.styleSheets) {
@@ -440,6 +444,7 @@ function __snapKeyframes() {
       if (rule.type !== 7 || seen.has(rule.name)) continue;
       seen.add(rule.name);
       const frames = [];
+      const keys = [];
       for (const frame of rule.cssRules || []) {
         const fs = frame.style;
         if (!fs) continue;
@@ -449,8 +454,10 @@ function __snapKeyframes() {
           decls.push([prop, fs.getPropertyValue(prop)]);
         }
         frames.push(decls);
+        keys.push(String(frame.keyText || ''));
       }
       out.push([rule.name, frames]);
+      if (keysOut) keysOut.push([rule.name, keys]);
     }
   }
   return out;
@@ -502,32 +509,31 @@ function __snapRunningAnimations(ids, shadowRoots = []) {
   return out;
 }
 
-// Which recorded pseudo-class states each element carries: one document
-// query per state (cheap), instead of N x states `matches` calls.
-function __snapStates(ids) {
+// Which recorded pseudo-class states each element carries: one query per
+// state (cheap), instead of N x states `matches` calls. A document query
+// does not reach into shadow trees, so each captured shadow root is asked
+// too: a disabled or checked control inside a web component has its state.
+function __snapStates(ids, shadowRoots = []) {
   const states = new Map();
-  for (const name of __SNAP_STATE_PSEUDOS) {
-    let list;
-    try { list = document.querySelectorAll(':' + name); } catch { continue; }
-    for (const el of list) {
-      const id = ids.get(el);
-      if (!id) continue;
-      let arr = states.get(id);
-      if (!arr) { arr = []; states.set(id, arr); }
-      arr.push(name);
+  const scopes = [document, ...shadowRoots];
+  const record = (selector, name) => {
+    for (const scope of scopes) {
+      let list;
+      try { list = scope.querySelectorAll(selector); } catch { return; }
+      for (const el of list) {
+        const id = ids.get(el);
+        if (!id) continue;
+        let arr = states.get(id);
+        if (!arr) { arr = []; states.set(id, arr); }
+        arr.push(name);
+      }
     }
-  }
+  };
+  for (const name of __SNAP_STATE_PSEUDOS) record(':' + name, name);
   // Custom elements without a definition (`:defined` is the common case;
-  // record its complement).
-  try {
-    for (const el of document.querySelectorAll(':not(:defined)')) {
-      const id = ids.get(el);
-      if (!id) continue;
-      let arr = states.get(id);
-      if (!arr) { arr = []; states.set(id, arr); }
-      arr.push('undefined');
-    }
-  } catch { /* older engines */ }
+  // record its complement). An engine without `:defined` throws, and the
+  // state is not recorded.
+  record(':not(:defined)', 'undefined');
   return states;
 }
 
@@ -674,7 +680,7 @@ const __impeccableSnapshot = {
       return i;
     };
 
-    const states = __snapStates(ids);
+    const states = __snapStates(ids, shadowRoots);
     const animated = __snapRunningAnimations(ids, shadowRoots);
     const els = new Array(elements.length - 1);
     for (let id = 1; id < elements.length; id++) {
@@ -765,6 +771,9 @@ const __impeccableSnapshot = {
           h: typeof el.height === 'number' ? el.height : 0,
           cur: el.currentSrc || '', src: typeof el.src === 'string' ? el.src : '',
         };
+        // `complete` separates an image whose fetch failed from one the
+        // browser has not requested yet; both have a naturalWidth of 0.
+        if (tag === 'IMG' && typeof el.complete === 'boolean') rec.md.cp = el.complete;
       }
       els[id - 1] = rec;
     }
@@ -778,6 +787,7 @@ const __impeccableSnapshot = {
       const v = body.innerText;
       bodyInnerText = typeof v === 'string' ? v : null;
     }
+    const keyframeKeys = [];
     const snapshot = {
       v: 1,
       textLines: true,
@@ -788,7 +798,8 @@ const __impeccableSnapshot = {
       scrollX: window.scrollX,
       scrollY: window.scrollY,
       html: docClone.outerHTML,
-      keyframes: __snapKeyframes(),
+      keyframes: __snapKeyframes(keyframeKeys),
+      keyframeKeys,
       linkedCss: __snapLinkedStylesheetText(),
       styleProps: __SNAP_STYLE_PROPS,
       pseudoProps: __SNAP_PSEUDO_PROPS,

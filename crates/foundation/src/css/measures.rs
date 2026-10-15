@@ -142,9 +142,31 @@ pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Option<Corner
 /// [`parse_radius_corners`] with `em` read against `em_px`, the element's
 /// font size.
 pub fn parse_radius_corners_em(value: Option<&str>, width_px: f64, em_px: f64) -> Option<Corners> {
+    let mut halves = value?.split('/');
+    let mut corners = radius_half_corners(halves.next().unwrap_or(""), width_px, em_px)?;
+    // An elliptical corner with a zero vertical radius is square
+    // (`10px / 0`): a corner rounds only when both of its radii do.
+    if let Some(vertical) = halves.next() {
+        let v = radius_half_corners(vertical, width_px, em_px)?;
+        for (h, v) in [
+            (&mut corners.top_left, v.top_left),
+            (&mut corners.top_right, v.top_right),
+            (&mut corners.bottom_right, v.bottom_right),
+            (&mut corners.bottom_left, v.bottom_left),
+        ] {
+            if v <= 0.0 {
+                *h = 0.0;
+            }
+        }
+    }
+    Some(corners)
+}
+
+/// One half of a `border-radius` shorthand (the radii before or after the
+/// `/`), filled out to four corners the way the shorthand does.
+fn radius_half_corners(half: &str, width_px: f64, em_px: f64) -> Option<Corners> {
     re!(WS_SPLIT, format!("{}+", WS));
-    let horizontal = value?.split('/').next().unwrap_or("");
-    let trimmed = js::trim(horizontal);
+    let trimmed = js::trim(half);
     if trimmed.is_empty() {
         return None;
     }
@@ -194,8 +216,13 @@ pub fn parse_radius_corner_px(value: Option<&str>, width_px: f64) -> Option<f64>
 pub fn parse_radius_corner_px_em(value: Option<&str>, width_px: f64, em_px: f64) -> Option<f64> {
     re!(WS_SPLIT_ONE, format!("{}+", WS));
     let trimmed = js::trim(value?);
-    let first = WS_SPLIT_ONE.split(trimmed).find(|t| !t.is_empty())?;
-    radius_token_px(first, width_px, em_px)
+    let mut tokens = WS_SPLIT_ONE.split(trimmed).filter(|t| !t.is_empty());
+    let horizontal = radius_token_px(tokens.next()?, width_px, em_px)?;
+    // `10px 0`: a zero vertical radius leaves the corner square.
+    match tokens.next() {
+        Some(vertical) if radius_token_px(vertical, width_px, em_px)? <= 0.0 => Some(0.0),
+        _ => Some(horizontal),
+    }
 }
 
 /// The custom-property lookup `resolveVarRefs` reads (`customPropMap.get`).
@@ -691,7 +718,11 @@ fn split_shadow_layers(s: &str) -> Vec<&str> {
 /// Whether a computed `box-shadow` draws anything: some layer with a visible
 /// color and a non-zero offset, blur or spread. Tailwind's ring and shadow
 /// variables compute to `rgba(0, 0, 0, 0) 0px 0px 0px 0px` layers, and a
-/// fully zero layer paints nothing even in an opaque color.
+/// fully zero layer paints nothing even in an opaque color. Nor does an
+/// unblurred layer whose negative spread pulls its shape in at least as far
+/// as its offset moves it, measured as a distance so a rounded corner moved
+/// diagonally still counts: outside, that shape stays under the box; inset,
+/// the hole it cuts covers the whole box (`0 0 0 -1px`).
 pub fn box_shadow_paints(box_shadow: &str) -> bool {
     re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
     re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
@@ -705,9 +736,14 @@ pub fn box_shadow_paints(box_shadow: &str) -> bool {
         }
         let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
         let cleaned = WORD_RE.replace_all(&cleaned, " ");
-        NUM_RE
-            .find_iter(&cleaned)
-            .any(|m| parse_float(m.as_str()) != 0.0)
+        let nums: Vec<f64> = NUM_RE.find_iter(&cleaned).map(|m| parse_float(m.as_str())).collect();
+        if !nums.iter().any(|&n| n != 0.0) {
+            return false;
+        }
+        match nums.as_slice() {
+            [x, y, blur, spread, ..] if *blur == 0.0 && x.hypot(*y) + spread <= 0.0 => false,
+            _ => true,
+        }
     })
 }
 
@@ -1298,6 +1334,16 @@ mod tests {
             "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 0px 0px 1px"
         ));
         assert!(box_shadow_paints("0 2px 4px"));
+        // review of #941: a negative spread with no blur keeps the shape
+        // under the box, or cuts a hole over all of it when inset.
+        assert!(!box_shadow_paints("rgb(0, 0, 0) 0px 0px 0px -1px"));
+        assert!(!box_shadow_paints("rgb(0, 0, 0) 0px 0px 0px -4px inset"));
+        assert!(!box_shadow_paints("rgb(0, 0, 0) 2px -2px 0px -3px"));
+        // A 4px diagonal move under a 4px pull still shows past a rounded
+        // corner (review of #968): the offset is read as a distance.
+        assert!(box_shadow_paints("rgb(0, 0, 0) 4px 4px 0px -4px"));
+        assert!(box_shadow_paints("rgb(0, 0, 0) 0px 4px 0px -3px"), "offset past the spread");
+        assert!(box_shadow_paints("rgb(0, 0, 0) 0px 0px 6px -2px"), "a blur reaches out");
     }
 
     #[test]
@@ -1341,6 +1387,20 @@ mod tests {
         );
         // The vertical half after `/` is not what a stripe runs along.
         assert_eq!(c("12px / 4px").top_left, 12.0);
+        // review of #941: but a zero vertical radius leaves the corner
+        // square, whatever its horizontal one.
+        assert_eq!(
+            c("10px / 0"),
+            Corners { top_left: 0.0, top_right: 0.0, bottom_right: 0.0, bottom_left: 0.0 }
+        );
+        assert_eq!(
+            c("10px / 0px 6px"),
+            Corners { top_left: 0.0, top_right: 10.0, bottom_right: 0.0, bottom_left: 10.0 }
+        );
+        assert_eq!(parse_radius_corners(Some("10px / calc(1px)"), 200.0), None);
+        assert_eq!(parse_radius_corner_px(Some("10px 0px"), 200.0), Some(0.0));
+        assert_eq!(parse_radius_corner_px(Some("10px 4px"), 200.0), Some(10.0));
+        assert_eq!(parse_radius_corner_px(Some("10px"), 200.0), Some(10.0));
         // rem and em read against the 16px root default; % against the box.
         assert_eq!(c("0.375rem").top_left, 6.0);
         assert_eq!(c("0.5em").bottom_right, 8.0);
