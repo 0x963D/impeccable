@@ -286,7 +286,7 @@ fn append_staleness_directive(parts: &mut Parts, ctx: &Ctx, options: &TargetOpti
     }
 }
 
-pub fn build_resolved_context_directive(ctx: &Ctx, options: &TargetOptions, target_exists: Option<bool>) -> String {
+fn append_resolved_context(parts: &mut Parts, ctx: &Ctx, options: &TargetOptions, target_exists: Option<bool>, provider: &Provider) {
     let target_path = if has_target_option(options) { options.target_path.clone() } else { None };
     let mut m = Map::new();
     m.insert("targetPath".into(), opt_string(&target_path));
@@ -302,7 +302,21 @@ pub fn build_resolved_context_directive(ctx: &Ctx, options: &TargetOptions, targ
     m.insert("surfaceBriefCandidates".into(), serde_json::to_value(&ctx.surface_brief_candidates).unwrap());
     m.insert("hasVisualImplementation".into(), Value::Bool(ctx.has_visual_implementation));
     m.insert("platform".into(), opt_string(&ctx.platform));
-    format!("RESOLVED_CONTEXT:\n{}", json_pretty(&Value::Object(m)))
+    let full = format!("RESOLVED_CONTEXT:\n{}", json_pretty(&Value::Object(m.clone())));
+    if ctx.surface_brief_candidates.is_empty() {
+        parts.push(full);
+        return;
+    }
+    m.insert("surfaceBriefCandidates".into(), Value::String(candidates_omitted(ctx, provider)));
+    parts.sized(full, format!("RESOLVED_CONTEXT:\n{}", json_pretty(&Value::Object(m))));
+}
+
+fn candidates_omitted(ctx: &Ctx, provider: &Provider) -> String {
+    format!(
+        "{} candidates omitted for size; run `{} list` to see every persisted brief",
+        ctx.surface_brief_candidates.len(),
+        provider.verb_cmd("surface-brief")
+    )
 }
 
 fn append_surface_brief_context(parts: &mut Parts, ctx: &Ctx, provider: &Provider) {
@@ -318,11 +332,14 @@ fn append_surface_brief_context(parts: &mut Parts, ctx: &Ctx, provider: &Provide
     if ctx.surface_brief_candidates.is_empty() {
         return;
     }
-    parts.push(format!(
-        "SURFACE_CONTEXT_AVAILABLE: Persisted surface briefs exist, but none was selected unambiguously for this invocation. Resolve the requested surface to its concrete primary or related source path, then run `{} read <path>` once before changing that surface. Candidates:\n{}",
-        provider.verb_cmd("surface-brief"),
-        json_pretty(&serde_json::to_value(&ctx.surface_brief_candidates).unwrap())
-    ));
+    let head = format!(
+        "SURFACE_CONTEXT_AVAILABLE: Persisted surface briefs exist, but none was selected unambiguously for this invocation. Resolve the requested surface to its concrete primary or related source path, then run `{} read <path>` once before changing that surface.",
+        provider.verb_cmd("surface-brief")
+    );
+    parts.sized(
+        format!("{} Candidates:\n{}", head, json_pretty(&serde_json::to_value(&ctx.surface_brief_candidates).unwrap())),
+        format!("{} Candidates: {}.", head, candidates_omitted(ctx, provider)),
+    );
 }
 
 fn should_warn_missing_target(ctx: &Ctx, target_provided: bool, target_exists: Option<bool>) -> bool {
@@ -641,7 +658,7 @@ pub fn run(args: &[String], io: &mut Io) -> i32 {
             parts.doc("# DESIGN.md".to_string(), ctx.design_path.as_deref().unwrap_or_default(), ctx.design.as_deref().unwrap_or_default());
         }
         append_surface_brief_context(&mut parts, &ctx, &provider);
-        parts.push(build_resolved_context_directive(&ctx, &options, target_exists));
+        append_resolved_context(&mut parts, &ctx, &options, target_exists, &provider);
         append_detector_fallback(&mut parts, &ctx, &cwd, &env, &provider);
         append_image_gen_directive(&mut parts, &env, &provider);
         append_build_path_directive(&mut parts, &ctx, &cwd);
@@ -664,7 +681,7 @@ pub fn run(args: &[String], io: &mut Io) -> i32 {
         parts.doc("# DESIGN.md".to_string(), ctx.design_path.as_deref().unwrap_or_default(), ctx.design.as_deref().unwrap_or_default());
     }
     append_surface_brief_context(&mut parts, &ctx, &provider);
-    parts.push(build_resolved_context_directive(&ctx, &options, target_exists));
+    append_resolved_context(&mut parts, &ctx, &options, target_exists, &provider);
     append_detector_fallback(&mut parts, &ctx, &cwd, &env, &provider);
     append_image_gen_directive(&mut parts, &env, &provider);
     append_build_path_directive(&mut parts, &ctx, &cwd);
@@ -699,17 +716,18 @@ pub fn run(args: &[String], io: &mut Io) -> i32 {
     0
 }
 
-/// One part of the context output. A document is what an over-budget run swaps for a pointer.
+/// One part of the context output.
 enum Part {
     Text(String),
-    Doc { heading: String, path: String, body: String },
+    /// Output whose size grows with the project, and the compact stand-in an over-budget run swaps in.
+    Sized { full: String, compact: String },
 }
 
 impl Part {
-    fn render(&self) -> String {
+    fn text(&self) -> &str {
         match self {
-            Part::Text(t) => t.clone(),
-            Part::Doc { heading, body, .. } => format!("{}\n\n{}", heading, body),
+            Part::Text(t) => t,
+            Part::Sized { full, .. } => full,
         }
     }
 }
@@ -722,28 +740,35 @@ impl Parts {
         self.0.push(Part::Text(text));
     }
 
-    fn doc(&mut self, heading: String, path: &str, body: &str) {
-        self.0.push(Part::Doc { heading, path: path.to_string(), body: js_trim(body).to_string() });
+    fn sized(&mut self, full: String, compact: String) {
+        self.0.push(Part::Sized { full, compact });
     }
 
-    /// Joins the parts. Over the budget, the largest inlined documents become pointers, one at a time, so the directives survive agent output truncation.
+    fn doc(&mut self, heading: String, path: &str, body: &str) {
+        let body = js_trim(body);
+        let pointer = format!("DOCUMENT_NOT_INLINED: {} ({} characters) is omitted here because inlining it would push this output's directives past agent tool-output limits. Read {} in full with your file-read tool before any design decision. Do not rerun `impeccable context` to see it.", path, body.chars().count(), path);
+        self.sized(format!("{}\n\n{}", heading, body), format!("{}\n\n{}", heading, pointer));
+    }
+
+    /// Joins the parts. Over the budget, the largest sized parts take their compact form, one at a time, so the directives survive agent output truncation.
     fn render(mut self) -> String {
         loop {
-            let out = self.0.iter().map(Part::render).collect::<Vec<_>>().join("\n\n---\n\n");
+            let out = self.0.iter().map(Part::text).collect::<Vec<_>>().join("\n\n---\n\n");
             let largest = self
                 .0
                 .iter()
                 .enumerate()
                 .filter_map(|(i, p)| match p {
-                    Part::Doc { body, .. } => Some((i, body.chars().count())),
+                    Part::Sized { full, .. } => Some((i, full.chars().count())),
                     Part::Text(_) => None,
                 })
                 .max_by_key(|&(_, size)| size);
-            let Some((i, size)) = largest.filter(|_| out.chars().count() > OUTPUT_BUDGET_CHARS) else {
+            let Some((i, _)) = largest.filter(|_| out.chars().count() > OUTPUT_BUDGET_CHARS) else {
                 return format!("{}\n", out);
             };
-            if let Part::Doc { heading, path, .. } = &self.0[i] {
-                self.0[i] = Part::Text(format!("{}\n\nDOCUMENT_NOT_INLINED: {} ({} characters) is omitted here because inlining it would push this output's directives past agent tool-output limits. Read {} in full with your file-read tool before any design decision. Do not rerun `impeccable context` to see it.", heading, path, size, path));
+            if let Part::Sized { compact, .. } = &mut self.0[i] {
+                let compact = std::mem::take(compact);
+                self.0[i] = Part::Text(compact);
             }
         }
     }
@@ -800,5 +825,15 @@ mod output_budget_tests {
         assert!(out.starts_with("# PRODUCT.md\n\nshort product\n\n---\n\n# DESIGN.md\n\nDOCUMENT_NOT_INLINED: DESIGN.md (24000 characters)"));
         assert!(out.contains("# SURFACE BRIEF (b.md)\n\nDOCUMENT_NOT_INLINED: b.md (23900 characters)"));
         assert!(out.ends_with("\n\n---\n\nDIRECTIVE_TAIL\n"));
+    }
+
+    #[test]
+    fn over_budget_compacts_oversized_lists_too() {
+        let mut parts = Parts::default();
+        parts.doc("# DESIGN.md".into(), "DESIGN.md", "small design");
+        parts.sized(format!("CANDIDATES:\n{}", "c".repeat(OUTPUT_BUDGET_CHARS)), "CANDIDATES: omitted".into());
+        parts.push("DIRECTIVE_TAIL".into());
+        let out = parts.render();
+        assert_eq!(out, "# DESIGN.md\n\nsmall design\n\n---\n\nCANDIDATES: omitted\n\n---\n\nDIRECTIVE_TAIL\n");
     }
 }
