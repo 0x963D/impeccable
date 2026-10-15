@@ -535,6 +535,22 @@ pub fn check_html_patterns_with(
     corpora: Option<&HtmlPatternCorpora>,
     context: &PatternContext,
 ) -> Vec<PatternFinding> {
+    check_html_patterns_picking(html, corpora, context, &|_| true)
+}
+
+/// [`check_html_patterns_with`] where a rule that reports only its first
+/// candidate (bounce-easing, dark-glow, radial-halo,
+/// repeating-stripes-gradient, codex-grid-background) reports the first one
+/// `stands` accepts. A rendering engine passes its selector and paint gates,
+/// so a candidate whose rule matches nothing it shows (a rule inside an
+/// `@media` block that does not apply) does not hide a later one that
+/// does. The file engines accept every candidate, which is the first.
+pub fn check_html_patterns_picking(
+    html: &str,
+    corpora: Option<&HtmlPatternCorpora>,
+    context: &PatternContext,
+    stands: &dyn Fn(&PatternFinding) -> bool,
+) -> Vec<PatternFinding> {
     let built;
     let corpora = match corpora {
         Some(c) => c,
@@ -672,12 +688,15 @@ pub fn check_html_patterns_with(
         else {
             continue;
         };
-        findings.push(pf(
+        let finding = pf(
             "bounce-easing",
             format!("animation: {}", label),
             enclosing_css_selector(style_text, bm.get(0).unwrap().start()),
-        ));
-        break;
+        );
+        if stands(&finding) {
+            findings.push(finding);
+            break;
+        }
     }
 
     for bm in BEZIER_RE.captures_iter(style_text) {
@@ -687,15 +706,18 @@ pub fn check_html_patterns_with(
             if bezier_is_unread_custom_property(style_text, bm.get(0).unwrap().start()) {
                 continue;
             }
-            findings.push(pf(
+            let finding = pf(
                 "bounce-easing",
                 format!(
                     "cubic-bezier({}, {}, {}, {})",
                     &bm[1], &bm[2], &bm[3], &bm[4]
                 ),
                 enclosing_css_selector(style_text, bm.get(0).unwrap().start()),
-            ));
-            break;
+            );
+            if stands(&finding) {
+                findings.push(finding);
+                break;
+            }
         }
     }
 
@@ -714,46 +736,46 @@ pub fn check_html_patterns_with(
 
     // --- Dark glow / chromatic halo shadows ---
     let glow_hits = scan_css_text_for_glow_with(style_text, context.dark_page);
-    if let Some(first) = glow_hits.first() {
-        findings.push(pf(
-            "dark-glow",
-            first.snippet.clone(),
-            enclosing_css_selector(style_text, first.index),
-        ));
-    }
+    findings.extend(
+        glow_hits
+            .iter()
+            .map(|h| pf("dark-glow", h.snippet.clone(), enclosing_css_selector(style_text, h.index)))
+            .find(|f| stands(f)),
+    );
     let halo_hits = scan_css_text_for_radial_halo_with(style_text, context.dark_page);
-    if let Some(first) = halo_hits.first() {
-        findings.push(pf(
-            "radial-halo",
-            first.snippet.clone(),
-            enclosing_css_selector(style_text, first.index),
-        ));
-    }
+    findings.extend(
+        halo_hits
+            .iter()
+            .map(|h| pf("radial-halo", h.snippet.clone(), enclosing_css_selector(style_text, h.index)))
+            .find(|f| stands(f)),
+    );
 
     // --- Generated-UI tells: repeating-gradient stripes ---
-    if let Some(sm) = REPEATING_GRADIENT_RE
-        .find_iter(style_text)
-        .find(|m| {
-            let radial = js::to_lower_case(m.as_str()).contains("radial");
-            repeating_gradient_repeats(&style_text[m.end()..], radial)
-        })
-    {
-        findings.push(pf(
-            "repeating-stripes-gradient",
-            "repeating-gradient decorative stripes".to_string(),
-            enclosing_css_selector(style_text, sm.start()),
-        ));
-    }
+    findings.extend(
+        REPEATING_GRADIENT_RE
+            .find_iter(style_text)
+            .filter(|m| {
+                let radial = js::to_lower_case(m.as_str()).contains("radial");
+                repeating_gradient_repeats(&style_text[m.end()..], radial)
+            })
+            .map(|sm| {
+                pf(
+                    "repeating-stripes-gradient",
+                    "repeating-gradient decorative stripes".to_string(),
+                    enclosing_css_selector(style_text, sm.start()),
+                )
+            })
+            .find(|f| stands(f)),
+    );
 
     // --- Generated-UI tells: two-axis grid-line background ---
     let grid_hits = scan_css_text_for_grid_background(style_text);
-    if let Some(first) = grid_hits.first() {
-        findings.push(pf(
-            "codex-grid-background",
-            first.snippet.clone(),
-            enclosing_css_selector(style_text, first.index),
-        ));
-    }
+    findings.extend(
+        grid_hits
+            .iter()
+            .map(|h| pf("codex-grid-background", h.snippet.clone(), enclosing_css_selector(style_text, h.index)))
+            .find(|f| stands(f)),
+    );
 
     // --- Generated-copy tells: "X theater" framing copy ---
     {

@@ -3131,7 +3131,7 @@ fn scroller_page_insets(dom: &dyn Dom, scroller: ElId, rect: &Rect) -> (f64, f64
     if paints_surface(scroller) {
         return (0.0, 0.0);
     }
-    let border = |el: ElId, side: &str| style_px(dom, el, &format!("border{side}Width")) > 0.0;
+    let border = |el: ElId, side: &str| border_side_shows(dom, el, side, None);
     // A panel the scroller fills with no padding draws its edge at the
     // scroller's clip edge: an ancestor (up to six levels) whose edge on that
     // side lies within 2px of the scroller's, with a border there, a fill, a
@@ -6002,7 +6002,17 @@ mod tests {
             d.inner_width = 390.0;
             let (_h, body) = d.with_page();
             let panel = d.add(Some(body), "div");
-            d.set_styles(panel, &[("borderLeftWidth", "1px"), ("borderRightWidth", "1px")]);
+            d.set_styles(
+                panel,
+                &[
+                    ("borderLeftWidth", "1px"),
+                    ("borderLeftStyle", "solid"),
+                    ("borderLeftColor", "rgb(220, 220, 220)"),
+                    ("borderRightWidth", "1px"),
+                    ("borderRightStyle", "solid"),
+                    ("borderRightColor", "rgb(220, 220, 220)"),
+                ],
+            );
             d.set_rect(panel, panel_left, 90.0, 390.0 - 2.0 * panel_left, 220.0);
             let sc = d.add(Some(panel), "div");
             d.set_styles(sc, &[("overflowX", "auto"), ("overflow", "auto")]);
@@ -6050,6 +6060,38 @@ mod tests {
         assert_eq!(drawn_by(false, "backgroundImage", "linear-gradient(rgb(250, 250, 250), rgb(240, 240, 240))"), 1, "a gradient panel");
         assert_eq!(drawn_by(true, "boxShadow", shadow), 1, "the scroller's own shadow");
         assert_eq!(drawn_by(false, "boxShadow", "none"), 0, "an unpainted panel");
+        // A transparent border draws nothing, on the panel or the scroller.
+        let transparent_border = |on_scroller: bool| {
+            let mut d = FakeDom::new();
+            d.inner_width = 390.0;
+            let (_h, body) = d.with_page();
+            let panel = d.add(Some(body), "div");
+            d.set_rect(panel, 16.0, 90.0, 358.0, 220.0);
+            let sc = d.add(Some(panel), "div");
+            d.set_styles(sc, &[("overflowX", "auto"), ("overflow", "auto")]);
+            d.set_rect(sc, 16.0, 100.0, 358.0, 200.0);
+            d.set_styles(
+                if on_scroller { sc } else { panel },
+                &[
+                    ("borderLeftWidth", "1px"),
+                    ("borderLeftStyle", "solid"),
+                    ("borderLeftColor", "rgba(0, 0, 0, 0)"),
+                ],
+            );
+            {
+                let e = d.el_mut(sc);
+                e.client_width = 358.0;
+                e.scroll_width = 900.0;
+            }
+            for x in [20.0, 292.0] {
+                let card = d.add(Some(sc), "article");
+                d.set_styles(card, &[("backgroundColor", "rgb(255, 255, 255)")]);
+                d.set_rect(card, x, 110.0, 260.0, 150.0);
+            }
+            check_edge_flush_cards_dom(&d).len()
+        };
+        assert_eq!(transparent_border(false), 0, "a transparent panel border");
+        assert_eq!(transparent_border(true), 0, "a transparent scroller border");
 
         // Past the gutter range (a desktop scroller in a centred column) the
         // card is judged as before.

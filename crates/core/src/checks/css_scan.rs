@@ -2889,6 +2889,17 @@ re!(
 /// The longest side of a pulsing dot over its shortest.
 const PULSE_DOT_MAX_ASPECT: f64 = 1.5;
 
+/// The px size an unprefixed Tailwind spacing class (`w-2`, `h-1.5`) gives
+/// one side, at Tailwind's 4px step; `None` when the class names none.
+fn tw_side_px(cls: &str, side: &str) -> Option<f64> {
+    cls.split_ascii_whitespace().find_map(|token| {
+        let n = token.strip_prefix(side)?.strip_prefix('-')?;
+        (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+            .then(|| parse_float(n) * 4.0)
+            .filter(|px| px.is_finite())
+    })
+}
+
 /// JS: checks.mjs#scanCssTextForPulsingDot. `markup` defaults to `content`.
 pub fn scan_css_text_for_pulsing_dot(content: &str, markup: Option<&str>) -> Vec<PatternFinding> {
     let markup = markup.unwrap_or(content);
@@ -3002,6 +3013,16 @@ pub fn scan_css_text_for_pulsing_dot(content: &str, markup: Option<&str>) -> Vec
         }
         if !TW_TINY_SIZE_RE.is_match(cls) {
             continue;
+        }
+        // With both sides named, the dot gates of the declaration path
+        // apply: `w-1 h-4` is a 4 by 16px bar, not a dot.
+        if let (Some(w), Some(h)) = (tw_side_px(cls, "w"), tw_side_px(cls, "h")) {
+            if w < 2.0 || h < 2.0 || w > 16.0 || h > 16.0 {
+                continue;
+            }
+            if math_max(w, h) > PULSE_DOT_MAX_ASPECT * math_min(w, h) {
+                continue;
+            }
         }
         let key = format!("tw:{}", cls);
         if seen.contains(&key) {
@@ -3146,6 +3167,13 @@ mod tests {
             ("<style>.q{r}", 10, None),
             (".a{b}.c{d}", 8, Some(".c")),
             (".a { b }", 0, None),
+            // Review of #1042: a nested style rule has no selector of its
+            // own (CSS nesting), whether it follows the parent's brace, a
+            // declaration, or an at-rule nested in the parent.
+            (".card { & > .s { c: d } }", 18, None),
+            (".card { c: d; .s { c: d } }", 21, None),
+            (".card { @media (x) { & .s { c: d } } }", 31, None),
+            ("@media (x) { .a{b} .c { d } }", 25, Some(".c")),
         ];
         for (text, idx, want) in cases {
             assert_eq!(
@@ -3302,6 +3330,12 @@ mod tests {
         assert!(pulses("@keyframes ty { 0%,60%,100% { opacity: .35; transform: none } 30% { opacity: 1; transform: translateY(-2px) } }"));
         // A percentage that changes cannot be read, and decides nothing.
         assert!(pulses("@keyframes q { 0% { transform: translate(-50%, -50%); opacity: 1 } 100% { transform: translate(-50%, -60%); opacity: 0 } }"));
+        // Review of #1042: a percentage on one axis leaves the other read,
+        // so a centred float travels on y; a percentage that matches on
+        // both steps reads the px beside it.
+        assert!(!pulses("@keyframes c { 0%,100% { opacity: .4; transform: translate(-50%, 0) } 50% { opacity: 1; transform: translate(-50%, -14px) } }"));
+        assert!(!pulses("@keyframes c2 { 0%,100% { opacity: .4; transform: translate(-50%, -50%) } 50% { opacity: 1; transform: translate(-50%, -50%) translateY(-12px) } }"));
+        assert!(pulses("@keyframes c3 { 0%,100% { opacity: .4; transform: translate(calc(-50% + 2px), 0) } 50% { opacity: 1; transform: translateX(-50%) } }"));
         // One height, or one step that translates, decides nothing.
         assert!(pulses("@keyframes h { 0%, 100% { opacity: .4; height: 8px } 50% { opacity: 1 } }"));
         assert!(pulses("@keyframes s { 0% { opacity: 1 } 50% { opacity: .5; transform: translateY(6px) } }"));
@@ -3322,6 +3356,13 @@ mod tests {
         assert_eq!(dots("6px", "9px"), 1, "1.5 to 1");
         assert_eq!(dots("3px", "6px"), 0, "a waveform bar");
         assert_eq!(dots("12px", "4px"), 0, "a pill");
+        // Review of #1042: the utility-class form reads both sides too.
+        let tw = |cls: &str| scan_css_text_for_pulsing_dot("", Some(&format!("<span class=\"{cls}\"></span>"))).len();
+        assert_eq!(tw("animate-pulse w-2 h-2 rounded-full"), 1);
+        assert_eq!(tw("animate-ping size-2 rounded-full"), 1);
+        assert_eq!(tw("animate-pulse w-2 h-3 rounded-full"), 1, "1.5 to 1");
+        assert_eq!(tw("animate-pulse w-1 h-4 rounded-full"), 0, "a 4 by 16px bar");
+        assert_eq!(tw("animate-pulse w-1 h-12 rounded-full"), 0, "a tall bar");
     }
 
     #[test]

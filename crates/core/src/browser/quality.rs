@@ -2198,8 +2198,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 let is_code_run = || {
                     let ws = st("whiteSpace");
                     crate::checks::text_rules::is_monospace_family(&st("fontFamily"))
-                        && ws.starts_with("pre")
-                        && ws != "pre-line"
+                        && ((ws.starts_with("pre") && ws != "pre-line") || ws == "break-spaces")
                         && (closest_or_none(dom, el, "pre, code, samp").is_some()
                             || direct_text(dom, el).chars().any(|c| ('\u{2500}'..='\u{257F}').contains(&c)))
                 };
@@ -5986,6 +5985,9 @@ mod tests {
         assert_eq!(leading(&d, pre), 1, "pre-line");
         d.set_style(pre, "whiteSpace", "pre");
         assert_eq!(leading(&d, pre), 0, "box art in a pre, by its ancestor too");
+        // break-spaces keeps its spaces as pre-wrap does.
+        d.set_style(pre, "whiteSpace", "break-spaces");
+        assert_eq!(leading(&d, pre), 0, "box art at break-spaces");
     }
 }
 
