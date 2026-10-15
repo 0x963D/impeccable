@@ -1557,11 +1557,6 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     if in_nav_header || has_own_bg || is_positioned || !(width_ratio > 0.5) {
         return None;
     }
-    // Nor does text in a fixed bar laid over the page: a consent bar or a
-    // notice is chrome, as the element's own fixed position is.
-    if in_a_fixed_bar(dom, el) {
-        return None;
-    }
     // Nor does text in a box caught part way through a move that ends.
     if super::painted::moves_mid_animation(dom, el) {
         return None;
@@ -1612,6 +1607,14 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
         None if has_direct_text && !prose_block => (rect.left, rect.right),
         None => return None,
     };
+    // Text in a fixed bar laid over the page (a consent bar, a notice) is
+    // chrome, as the element's own fixed position is, and its gutter is the
+    // bar's business, unless the words reach the screen's edge itself.
+    if in_a_fixed_bar(dom, el)
+        && js::math_min(left, viewport_width - right) >= FIXED_BAR_EDGE_FLOOR_PX
+    {
+        return None;
+    }
     // Text wholly past either side of the viewport meets no edge a reader
     // sees: a desktop column laid out past a phone viewport, a list parked
     // 800px to the right.
@@ -1621,6 +1624,10 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
         None
     }
 }
+
+/// How close to the screen's edge text in a fixed bar may sit and still be
+/// left to the bar: nearer than this, the words touch the edge and report.
+const FIXED_BAR_EDGE_FLOOR_PX: f64 = 4.0;
 
 /// The share of the viewport's height under which a fixed ancestor is a bar
 /// laid over the page rather than a layer that holds it.
@@ -4718,6 +4725,16 @@ mod tests {
         d.set_rect(p, 15.0, 672.0, 716.0, 34.0);
         d.set_text_rect(p, 15.0, 673.0, 700.0, 32.0);
         assert!(snippets(&d, p, "body-text-viewport-edge").is_empty(), "consent bar");
+        // Words that touch the screen's edge report inside a bar too.
+        d.set_rect(p, 0.0, 672.0, 716.0, 34.0);
+        d.set_text_rect(p, 2.0, 673.0, 700.0, 32.0);
+        assert_eq!(
+            snippets(&d, p, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px)")],
+            "touching"
+        );
+        d.set_rect(p, 15.0, 672.0, 716.0, 34.0);
+        d.set_text_rect(p, 15.0, 673.0, 700.0, 32.0);
         // The same copy in a window-tall fixed layer reports.
         d.set_rect(bar, 0.0, 0.0, 1280.0, 800.0);
         let want = vec![format!("<p> with {len}-char body bleeds to viewport edge (left 15px)")];
