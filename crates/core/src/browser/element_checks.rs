@@ -561,7 +561,8 @@ const FACE_COLOURS_MAX: usize = 256;
 /// tests as [`read_pseudo_surface_dom`]; an explicit `opacity: 0`,
 /// `visibility: hidden`, a transform, translate or scale other than the
 /// identity,
-/// or a bottom layer drawn once at a stated size), where its colour is
+/// or a bottom layer [`layer_entry_fills`] does not show to fill the face),
+/// where its colour is
 /// what paints (that function reads it), where any layer is not a gradient
 /// or the bottom layer lets something through, where the capture places it
 /// off the text run, and where it is not at a negative `z-index` the
@@ -660,20 +661,13 @@ pub(crate) fn read_pseudo_gradient_face(
             {
                 continue;
             }
-            // A bottom layer drawn once at a stated size (a strip, a corner
-            // wash) does not paint under the whole run.
+            // A bottom layer not shown to fill the face (a strip, a corner
+            // wash, a size or place held in a `calc`) need not paint under
+            // the whole run. The same coverage test as the upper layers and as
+            // [`pseudo_covering_gradient`], so a face the colour reader
+            // leaves to this one is taken here.
             if let Some(bottom) = crate::color::split_top_level_commas(&shorthand).last() {
-                let once = bottom.contains("no-repeat") || bottom.contains("repeat-x") || bottom.contains("repeat-y");
-                let size = bottom.split('/').nth(1).map(|t| {
-                    t.split_whitespace()
-                        .take_while(|w| !w.ends_with("-box") && *w != "text")
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                });
-                let fills = size.as_deref().map_or(true, |s| {
-                    matches!(s, "" | "auto" | "auto auto" | "cover" | "100%" | "100% 100%")
-                });
-                if once && !fills {
+                if !layer_entry_fills(bottom) {
                     continue;
                 }
             }
@@ -761,9 +755,8 @@ fn layer_hides_beneath(stops: &[measures::GradientStop], entry: &str) -> bool {
 }
 
 /// The index (top first) of the topmost gradient layer that hides
-/// everything beneath it: every stop opaque, drawn at a size that fills the
-/// face (`auto`, `100%`, `cover`) and placed where a filling layer leaves no
-/// gap (a percentage or keyword offset, or a tile repeated on both axes).
+/// everything beneath it: every stop opaque and shown by
+/// [`layer_entry_fills`] to fill the face.
 /// `None` when no layer is shown to cover, including where the computed
 /// `background` shorthand does not name one entry per layer: the size and
 /// place are then unknown, and every layer stays in the reading.
@@ -780,54 +773,114 @@ pub(crate) fn topmost_covering_layer(stops_by_layer: &[Vec<measures::GradientSto
 
 /// Whether one entry of a computed `background` shorthand
 /// (`linear-gradient(...) repeat scroll 0% 0% / auto padding-box border-box`)
-/// draws its image over the whole box.
+/// provably draws its image over the whole face. The one coverage test both
+/// pseudo readers use ([`read_pseudo_surface_dom`] through
+/// [`pseudo_covering_gradient`], and [`read_pseudo_gradient_face`] for its
+/// covering layer and its bottom layer), so the two never disagree about a
+/// face and leave it to neither. Callers pass gradient layers only.
+///
+/// Conservative: `false` wherever coverage is not certain, which keeps every
+/// layer in the reading. A size or position that holds a function (`calc`,
+/// `var`, `min`, `max`, `clamp`, ...) is not evaluated, nor is a
+/// `background-clip: text` or anything else unparsed.
+///
+/// Covering means a tile on both axes (`repeat` or `round`, at a size with
+/// no zero, since a zero-sized image is not drawn; `space` can leave gaps),
+/// or a size that is the positioning area at a position that cannot shift
+/// it. A gradient has no natural size or ratio, so per CSS Backgrounds 3
+/// (`background-size`) an `auto` falls back to the positioning area's
+/// dimension, "treating it as 100%": `auto`, `100% auto` (the computed form
+/// of `background-size: 100%`), `auto 100%` and `100% 100%` all size a
+/// gradient to the whole area, as does `cover`. Such an image sits flush at
+/// any percentage or keyword offset, since a percentage aligns the same
+/// point of image and area; a non-zero length shifts it off one edge.
 fn layer_entry_fills(entry: &str) -> bool {
-    // Drop every function (the image, any colour) at the top level.
-    let mut rest = String::with_capacity(entry.len());
-    let mut depth = 0usize;
+    // Top-level tokens, with each function kept whole and `/` on its own.
+    let mut tokens: Vec<String> = Vec::new();
     let mut word = String::new();
+    let mut depth = 0usize;
     for ch in entry.chars() {
         match ch {
             '(' => {
                 depth += 1;
-                word.clear();
+                word.push(ch);
             }
-            ')' => depth = depth.saturating_sub(1),
-            _ if depth > 0 => {}
+            ')' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+                word.push(ch);
+            }
+            _ if depth > 0 => word.push(ch),
             c if c.is_whitespace() || c == '/' => {
-                rest.push_str(&word);
-                word.clear();
-                rest.push(c);
+                if !word.is_empty() {
+                    tokens.push(std::mem::take(&mut word));
+                }
+                if c == '/' {
+                    tokens.push("/".to_string());
+                }
             }
             c => word.push(c),
         }
     }
-    rest.push_str(&word);
-    if depth != 0 || rest.contains("text") {
+    if depth != 0 {
         return false;
     }
-    let mut halves = rest.splitn(2, '/');
-    let before: Vec<&str> = halves.next().unwrap_or("").split_whitespace().collect();
-    let size: Vec<&str> = halves
-        .next()
-        .unwrap_or("")
-        .split_whitespace()
-        .take_while(|w| !w.ends_with("-box"))
-        .collect();
-    let size_fills = size.is_empty() || size == ["cover"] || (size.len() <= 2 && size.iter().all(|t| matches!(*t, "auto" | "100%")));
-    if !size_fills {
+    if !word.is_empty() {
+        tokens.push(word);
+    }
+    // The image and the colour are the only functions this test reads past;
+    // any other (`calc(50% + 1px)`) leaves the size or place unknown.
+    const IMAGE_OR_COLOUR: [&str; 22] = [
+        "linear-gradient", "radial-gradient", "conic-gradient", "repeating-linear-gradient",
+        "repeating-radial-gradient", "repeating-conic-gradient", "-webkit-linear-gradient",
+        "-webkit-radial-gradient", "-webkit-repeating-linear-gradient", "-webkit-repeating-radial-gradient",
+        "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color", "color-mix", "light-dark",
+    ];
+    let mut plain: Vec<&str> = Vec::with_capacity(tokens.len());
+    for t in &tokens {
+        match t.find('(') {
+            Some(i) if IMAGE_OR_COLOUR.contains(&t[..i].to_ascii_lowercase().as_str()) => {}
+            Some(_) => return false,
+            None => plain.push(t.as_str()),
+        }
+    }
+    if plain.iter().any(|w| *w == "text") {
+        return false;
+    }
+    let slash = plain.iter().position(|w| *w == "/");
+    let (before, size): (&[&str], Vec<&str>) = match slash {
+        Some(i) => (
+            &plain[..i],
+            plain[i + 1..].iter().copied().take_while(|w| !w.ends_with("-box")).collect(),
+        ),
+        None => (&plain[..], vec![]),
+    };
+    if size.contains(&"/") || size.len() > 2 {
         return false;
     }
     let repeat_words = ["repeat", "no-repeat", "repeat-x", "repeat-y", "space", "round"];
-    let tiles_both = !before.iter().any(|w| matches!(*w, "no-repeat" | "repeat-x" | "repeat-y"));
-    let position = before
+    let position: Vec<&str> = before
         .iter()
-        .filter(|w| !repeat_words.contains(w) && !matches!(**w, "scroll" | "fixed" | "local") && !w.ends_with("-box"));
-    // An image the size of the box sits flush at any percentage; a length
-    // other than zero shifts it, which only a tile on both axes covers.
-    tiles_both
-        || position.into_iter().all(|w| {
-            w.ends_with('%') || matches!(*w, "left" | "right" | "top" | "bottom" | "center") || parse_float(w) == 0.0
+        .copied()
+        .filter(|w| !repeat_words.contains(w) && !matches!(*w, "scroll" | "fixed" | "local") && !w.ends_with("-box"))
+        .collect();
+    if position.len() > 2 {
+        return false;
+    }
+    let length_ok = |w: &str| w.ends_with('%') || w.ends_with("px") || w == "0" || w.ends_with("em") || w.ends_with("rem");
+    let tiles_both = !before.iter().any(|w| matches!(*w, "no-repeat" | "repeat-x" | "repeat-y" | "space"));
+    if tiles_both {
+        return size.is_empty()
+            || size == ["cover"]
+            || size == ["contain"]
+            || size.iter().all(|t| *t == "auto" || (length_ok(t) && parse_float(t) > 0.0));
+    }
+    let size_fills = size.is_empty() || size == ["cover"] || size.iter().all(|t| matches!(*t, "auto" | "100%"));
+    size_fills
+        && position.iter().all(|w| {
+            w.ends_with('%') || matches!(*w, "left" | "right" | "top" | "bottom" | "center") || (length_ok(w) && parse_float(w) == 0.0)
         })
 }
 
@@ -9627,6 +9680,17 @@ mod tests {
         assert!(layered(black, "no-repeat scroll 0% 0% / 100% 50% padding-box border-box", true), "a half-height layer");
         assert!(layered(black, "no-repeat scroll 12px 0% / auto padding-box border-box", true), "a shifted layer");
         assert!(layered(black, full, false), "size and place unread: every layer stays");
+        // A size or place held in a function is not read as covering
+        // (review: calc): `calc(50% + 1px)` leaves half the white showing.
+        assert!(layered(black, "no-repeat scroll 0% 0% / calc(50% + 1px) 100% padding-box border-box", true), "a calc size");
+        assert!(layered(black, "no-repeat scroll calc(0% + 12px) 0% / auto padding-box border-box", true), "a calc position");
+        assert!(layered(black, "repeat scroll 0% 0% / var(--w) 100% padding-box border-box", true), "a var size");
+        // A gradient has no natural size, so `auto` in one axis is the
+        // positioning area's: `100% auto` and `auto 100%` fill the face.
+        assert!(!layered(black, "no-repeat scroll 0% 0% / 100% auto padding-box border-box", true));
+        assert!(!layered(black, "no-repeat scroll 0% 0% / auto 100% padding-box border-box", true));
+        assert!(!layered(black, "repeat scroll 3px 5px / 10px 10px padding-box border-box", true), "a tile on both axes");
+        assert!(layered(black, "space scroll 0% 0% / 10px 10px padding-box border-box", true), "spaced tiles leave gaps");
         // The colour under an opaque full layer is hidden too: a white
         // background colour does not stand in for a black face.
         let hits = run_with(
@@ -9635,6 +9699,26 @@ mod tests {
             &[("backgroundColor", "rgb(255, 255, 255)"), ("background", &format!("rgb(255, 255, 255) {}", entry(black, full)))],
         );
         assert!(hits.is_empty(), "{hits:?}");
+        // Both readers take the same size as covering (review: `100% auto`):
+        // an opaque light face drawn once at `100% auto` over a white colour
+        // is read as the face, not left to the ring behind it.
+        for size in ["100% auto", "auto 100%", "auto"] {
+            let tail = format!("no-repeat scroll 0% 0% / {size} padding-box border-box");
+            let hits = run_with(
+                light,
+                "isolate",
+                &[("backgroundColor", "rgb(255, 255, 255)"), ("background", &format!("rgb(255, 255, 255) {}", entry(light, &tail)))],
+            );
+            assert!(hits.iter().any(|h| h.snippet.contains("(gradient on a::after)")), "{size}: {hits:?}");
+        }
+        // A strip under a colour is neither reader's face.
+        let tail = "no-repeat scroll 0% 0% / calc(100% - 1px) 100% padding-box border-box";
+        let hits = run_with(
+            light,
+            "isolate",
+            &[("backgroundColor", "rgb(255, 255, 255)"), ("background", &format!("rgb(255, 255, 255) {}", entry(light, tail)))],
+        );
+        assert!(hits.iter().all(|h| !h.snippet.contains("(gradient on a::after)")), "{hits:?}");
         let hits = run_with(half, "isolate", &[("backgroundColor", "rgb(255, 255, 255)")]);
         assert!(!hits.is_empty(), "a translucent layer over a white colour stays the colour's reading");
     }
