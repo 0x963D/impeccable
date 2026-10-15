@@ -108,9 +108,10 @@ pub fn instructions_for_event(event: &Map<String, Value>, self_cmd: &str) -> Opt
                 == Some(&Value::Bool(true));
             let result = event.get("_acceptResult");
             let refused = result.and_then(|r| r.get("handled")) == Some(&Value::Bool(false));
-            // A refused discard always ends with live-complete --discarded:
-            // it refuses while the wrapper is still in source, and it records
-            // the discard even when the poll's own completion never landed.
+            // A refused discard always ends with live-complete --discarded,
+            // which records the discard even when the poll's own completion
+            // never landed. It does not check the source, so the agent
+            // confirms the wrapper is gone first.
             let complete = format!("{} --id {} --discarded", script_cmd(self_cmd, "live-complete"), id);
             Some(if refused {
                 let err = match result.and_then(|r| r.get("error")) {
@@ -126,8 +127,8 @@ pub fn instructions_for_event(event: &Map<String, Value>, self_cmd: &str) -> Opt
                     )
                 } else {
                     format!(
-                        "Discard did NOT restore the source: {}. If the impeccable-variants wrapper for {} is still in source, replace it with the original element by hand (the VCS diff shows what it replaced). Then run {} (it refuses while the wrapper remains) and poll again.",
-                        err, id, complete
+                        "Discard did NOT restore the source: {}. If the impeccable-variants wrapper for {} is still in source, replace it with the original element by hand (the VCS diff shows what it replaced). Once no impeccable-variants marker for {} remains in source, run {} and poll again.",
+                        err, id, id, complete
                     )
                 }
             } else if ack_ok {

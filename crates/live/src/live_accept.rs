@@ -1163,14 +1163,30 @@ fn original_or_refuse(
     if let Some(original) = extract_original(lines, block) {
         return Some(original);
     }
-    // Only this session's own wrapper tag counts: a nested insert, or CSS
-    // that names the attribute, must not exempt a replace wrapper.
+    // Only this session's own wrapper tag counts, read whole even when a
+    // formatter split its attributes over several lines: a nested insert, or
+    // CSS that names the attribute, must not exempt a replace wrapper.
     let end = re.min(lines.len().saturating_sub(1));
-    lines[rs..=end]
-        .iter()
-        .find(|l| has_variant_wrapper_attr(l, id))
-        .is_some_and(|l| INSERT_MODE_RE.is_match(&l[..l.find('>').unwrap_or(l.len())]))
+    let text = lines[rs..=end].join("\n");
+    wrapper_open_tag(&text, id)
+        .is_some_and(|tag| INSERT_MODE_RE.is_match(tag))
         .then(Vec::new)
+}
+
+/// The whole opening tag that carries `data-impeccable-variants="<id>"`,
+/// from its `<` to its `>`, across line breaks.
+fn wrapper_open_tag<'a>(text: &'a str, id: &str) -> Option<&'a str> {
+    let e = regex::escape(id);
+    let re = Regex::new(&format!(
+        r#"data-impeccable-variants{ws}*={ws}*(?:"{id}"|'{id}'|\{{["']{id}["']\}})"#,
+        ws = WS,
+        id = e
+    ))
+    .ok()?;
+    let m = re.find(text)?;
+    let start = text[..m.start()].rfind('<')?;
+    let end = m.end() + text[m.end()..].find('>')?;
+    Some(&text[start..=end])
 }
 
 /// JS: extractVariant(lines, block, variantNum)
@@ -1461,6 +1477,29 @@ mod original_slot_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(err.starts_with("Original not found"), "{err}");
         assert_eq!(out, src.join("\n"));
+    }
+
+    #[test]
+    fn an_insert_wrapper_split_over_lines_still_discards() {
+        let src = [
+            "<main>",
+            "  <!-- impeccable-variants-start ab12cd34 -->",
+            "  <div",
+            "    data-impeccable-variants=\"ab12cd34\"",
+            "    data-impeccable-mode=\"insert\"",
+            "    data-impeccable-variant-count=\"1\"",
+            "    style=\"display: contents\"",
+            "  >",
+            "    <div data-impeccable-variant=\"1\"><p>New</p></div>",
+            "  </div>",
+            "  <!-- impeccable-variants-end ab12cd34 -->",
+            "</main>",
+        ];
+        let (dir, path, lines) = scratch("index.html", &src);
+        handle_discard_unlocked("ab12cd34", &lines, &path).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(out, "<main>\n</main>");
     }
 
     #[test]
