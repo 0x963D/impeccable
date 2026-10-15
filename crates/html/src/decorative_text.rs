@@ -208,6 +208,9 @@ pub fn decorative_text_facts(el: &StaticElement<'_>) -> DecorativeTextFacts {
         picture_ancestor,
         framed_demo: crate::text_context::in_framed_demo(el),
         text,
+        // The static engine reads no layout, so the ghost-wordmark shape,
+        // which needs the type's rendered size and opacity, never applies.
+        ..Default::default()
     }
 }
 

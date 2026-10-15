@@ -36,6 +36,13 @@
 //!   caption on it or beside it (r8-t1). Sentence-length copy inside is
 //!   still copy. `undersized-ui-text` and `tiny-text` report text in a
 //!   mockup as advisory too.
+//! - **Ghost wordmarks**: the site's own name set as a shape, not a line to
+//!   read: display type at [`WORDMARK_MIN_PX`] or more, or at
+//!   [`WORDMARK_H1_SCALE`] times the page's largest `h1`, painted at
+//!   [`WORDMARK_MAX_OPACITY`] or less (its opacity and its ink's alpha
+//!   together), whose words are the site's name (screen.movie's 222px
+//!   "Screen Movie" at 0.1 in the footer, incredible.one's 272px
+//!   "Incredible" at 0.07 alpha). Outside controls; a heading may carry it.
 //!
 //! The adapters gather [`DecorativeTextFacts`] against their own DOM; the
 //! decision is made here, once, for both engines.
@@ -52,6 +59,14 @@ pub const AVATAR_MIN_ASPECT: f64 = 0.8;
 pub const AVATAR_MAX_ASPECT: f64 = 1.25;
 /// How far the text's centre may sit from the box's, as a share of the box.
 pub const AVATAR_CENTRE_TOLERANCE: f64 = 0.15;
+
+/// Type at least this large, in px, is display type a wordmark can be.
+pub const WORDMARK_MIN_PX: f64 = 120.0;
+/// Type at least this many times the page's largest `h1` is display type.
+pub const WORDMARK_H1_SCALE: f64 = 3.0;
+/// The most a wordmark may show of its ink, its opacity and its colour's
+/// alpha together, and still be a shape rather than a line to read.
+pub const WORDMARK_MAX_OPACITY: f64 = 0.25;
 
 /// Whether a box is the size and shape of a small avatar.
 pub fn avatar_sized(width: f64, height: f64) -> bool {
@@ -106,6 +121,18 @@ pub struct DecorativeTextFacts {
     /// ([`crate::checks::text_context::in_framed_demo`], taste calls r5-p26
     /// and r8-t1).
     pub framed_demo: bool,
+    /// The element's computed font size in px, 0 where it was not read.
+    pub font_size_px: f64,
+    /// The largest computed font size of an `h1` on the page in px, 0 where
+    /// there is none.
+    pub largest_h1_px: f64,
+    /// How much of its ink the text shows: its effective opacity times its
+    /// colour's alpha. Read only where the type is display size; 1 otherwise.
+    pub shown_opacity: f64,
+    /// The names the site goes by (its host name, its `og:site_name`, its
+    /// title and the title's parts). Read only where the type is display
+    /// size and faint; empty otherwise.
+    pub site_names: Vec<String>,
 }
 
 /// The shape a text with no reading job was recognised by.
@@ -115,6 +142,7 @@ pub enum DecorativeShape {
     VersionStamp,
     Signature,
     Mockup,
+    Wordmark,
 }
 
 /// The decorative shape these facts show, if any.
@@ -127,6 +155,13 @@ pub fn classify_decorative_text(f: &DecorativeTextFacts) -> Option<DecorativeSha
     }
     if (f.mockup_ancestor || f.framed_demo) && !is_sentence_copy(&f.text) {
         return Some(DecorativeShape::Mockup);
+    }
+    if !f.control_label
+        && is_wordmark_size(f.font_size_px, f.largest_h1_px)
+        && f.shown_opacity <= WORDMARK_MAX_OPACITY
+        && names_the_site(&f.text, &f.site_names)
+    {
+        return Some(DecorativeShape::Wordmark);
     }
     if f.avatar_box
         && !f.control_label
@@ -147,6 +182,39 @@ pub fn classify_decorative_text(f: &DecorativeTextFacts) -> Option<DecorativeSha
         }
     }
     None
+}
+
+/// Whether type at `font_size` is display type for a wordmark: at least
+/// [`WORDMARK_MIN_PX`], or [`WORDMARK_H1_SCALE`] times the page's largest
+/// `h1` where it has one.
+pub fn is_wordmark_size(font_size: f64, largest_h1: f64) -> bool {
+    font_size.is_finite()
+        && font_size > 0.0
+        && (font_size >= WORDMARK_MIN_PX || (largest_h1 > 0.0 && font_size >= largest_h1 * WORDMARK_H1_SCALE))
+}
+
+/// The words of `text`, lower-cased, letters and digits only.
+fn name_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Whether `text` is the site's name: its words, run together, are one of
+/// `names` run together (`Screen Movie` and the host `screen.movie`), or they
+/// open one of `names` word for word (`Screen Movie` and the title `Screen
+/// Movie Blog`). At least three letters.
+pub fn names_the_site(text: &str, names: &[String]) -> bool {
+    let words = name_words(text);
+    let joined: String = words.concat();
+    if joined.chars().count() < 3 {
+        return false;
+    }
+    names.iter().any(|name| {
+        let name_words = name_words(name);
+        name_words.concat() == joined || name_words.starts_with(&words)
+    })
 }
 
 /// One letter or two, in any script, and nothing else.
@@ -435,6 +503,33 @@ mod tests {
 
     fn facts(text: &str) -> DecorativeTextFacts {
         DecorativeTextFacts { text: text.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_ghost_wordmark_is_the_site_name_as_a_faint_display_shape() {
+        let names = vec!["screenmovie".to_string(), "screen".to_string(), "Screen Movie Blog".to_string()];
+        let ghost = |text: &str, size: f64, h1: f64, shown: f64| DecorativeTextFacts {
+            font_size_px: size,
+            largest_h1_px: h1,
+            shown_opacity: shown,
+            site_names: names.clone(),
+            ..facts(text)
+        };
+        let shape = |f: &DecorativeTextFacts| classify_decorative_text(f);
+        // screen.movie's footer: 222px at 0.1.
+        assert_eq!(shape(&ghost("Screen Movie", 222.0, 64.0, 0.1)), Some(DecorativeShape::Wordmark));
+        assert_eq!(shape(&ghost("SCREEN", 222.0, 64.0, 0.1)), Some(DecorativeShape::Wordmark));
+        // Three times the largest h1 is display type too.
+        assert_eq!(shape(&ghost("Screen Movie", 100.0, 32.0, 0.2)), Some(DecorativeShape::Wordmark));
+        // Read as a line: visible enough, small, another word, or a control.
+        assert_eq!(shape(&ghost("Screen Movie", 222.0, 64.0, 0.4)), None);
+        assert_eq!(shape(&ghost("Screen Movie", 96.0, 48.0, 0.1)), None);
+        assert_eq!(shape(&ghost("Record faster", 222.0, 64.0, 0.1)), None);
+        assert_eq!(shape(&ghost("Movie", 222.0, 64.0, 0.1)), None);
+        assert_eq!(shape(&DecorativeTextFacts { control_label: true, ..ghost("Screen Movie", 222.0, 64.0, 0.1) }), None);
+        // An adapter that reads no layout leaves the size at 0.
+        assert_eq!(shape(&ghost("Screen Movie", 0.0, 0.0, 0.0)), None);
+        assert!(!names_the_site("Sc", &["sc".to_string()]));
     }
 
     #[test]

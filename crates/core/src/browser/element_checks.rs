@@ -1107,6 +1107,11 @@ fn opacity_of(dom: &dyn Dom, el: ElId) -> f64 {
     }
 }
 
+/// The fill alpha from which a translucent box the contrast walk folds over
+/// what lies below it is, to the hit-test stacks, the surface its text sits
+/// on: it shows at most a twentieth of what is under it.
+const STACKS_HOST_MIN_ALPHA: f64 = 0.95;
+
 /// The opacity under which a box that is also moving reads as the first
 /// frames of a reveal rather than a faded box at rest.
 const REVEAL_OPACITY: f64 = 0.1;
@@ -1125,6 +1130,9 @@ const REVEAL_WILL_CHANGE: &[&str] = &["opacity", "filter", "transform", "transla
 ///   `opacity` or its `filter`;
 /// - it is blurred (`filter: blur()` with a radius above 0), which no reader
 ///   is asked to read through;
+/// - a paused loop that takes it out of sight every cycle holds it below
+///   full opacity ([`crate::browser::painted::paused_mid_loop`]): a page that
+///   pauses its loops off screen plays them once a visitor arrives;
 /// - its opacity is under [`REVEAL_OPACITY`] while it is moved or about to
 ///   be (a `transform` other than the identity, `translate`, `scale` or
 ///   `rotate` other than `none`, a `will-change` naming one of them): a box
@@ -1149,6 +1157,9 @@ fn opacity_at_rest(dom: &dyn Dom, el: ElId, opacity: f64) -> bool {
         return false;
     }
     if has_active_blur(&dom.style(el, "filter")) {
+        return false;
+    }
+    if crate::browser::painted::paused_mid_loop(dom, el) {
         return false;
     }
     if crate::browser::painted::declares_transition_of(dom, el, "opacity") && visibly_displaced(dom, el) {
@@ -1957,10 +1968,26 @@ pub fn check_element_colors_dom(
     };
     let resolved_surface = if surface_unresolved { None } else { effective_bg };
     let surface_host = if pseudo_surface_read { Some(el) } else { surface.host };
+    // The walk reads a fill under 0.99 alpha as a wash over what lies below
+    // it, and its colour is folded over that. To the hit-test stacks a fill
+    // at least [`STACKS_HOST_MIN_ALPHA`] opaque is the surface the text sits
+    // on: juskoe.vercel.app's nav pill (`rgba(255, 255, 255, 0.95)`) took the
+    // page ground as the walk's host, and the stacks read the pill under the
+    // links as paint the walk never read. The colour scored is unchanged.
+    let stacks_host = if pseudo_surface_read {
+        surface_host
+    } else {
+        surface
+            .overlays
+            .iter()
+            .find(|(_, fill)| fill.alpha_or_one() >= STACKS_HOST_MIN_ALPHA)
+            .map(|(node, _)| *node)
+            .or(surface_host)
+    };
     let layers = std::cell::OnceCell::new();
     let layers_at = || {
         *layers.get_or_init(|| {
-            crate::browser::text_layers::layers_at_text(dom, el, surface_host, resolved_surface)
+            crate::browser::text_layers::layers_at_text(dom, el, stacks_host, resolved_surface)
         })
     };
     // A surface in exactly the text's own colour. Where the hit-test stacks
@@ -1991,6 +2018,14 @@ pub fn check_element_colors_dom(
             && (on_page_ground(dom, surface_host)
                 || under().0 != crate::browser::visual::LayerUnder::Ancestor))
             || (on_page_ground(dom, surface_host) && crate::browser::visual::page_ground_paints_picture(dom)));
+    // On the link and span path a surface in the ink's own colour is taken
+    // only from a box of the page's own (v0-memorialqrwebsitecode-90's white
+    // "Start Chat" on its white card). The page ground is the walk's
+    // fallback, and the stacks confirm it for text whose real ground the
+    // capture does not record: a browser's dark JSON viewer read as the white
+    // canvas, a menu button's hidden white label in a white header. The full
+    // pass keeps its own reading of the page ground.
+    let safe_tag_on_page_ground = same_hex && SAFE_TAGS.contains(&tag.as_str()) && on_page_ground(dom, surface_host);
     // What the glyphs and their surface paint: a filter on a box that holds
     // the surface repaints both, and the verdicts read what it paints; one
     // the engine cannot model leaves none (`ink_paint`). The structural tests
@@ -2086,7 +2121,7 @@ pub fn check_element_colors_dom(
         visible_text,
         bg_source,
         bg_source_host,
-        same_color_surface_is_unread,
+        same_color_surface_is_unread: same_color_surface_is_unread || safe_tag_on_page_ground,
     };
     // A contrast verdict is about the surface the walk resolved. Where the
     // hit-test stacks say the text is covered at capture (a fixed banner over
@@ -5391,6 +5426,52 @@ mod tests {
             .collect()
     }
 
+    /// iubcr.vercel.app (10046936): a notification row on `notif-cycle 9s
+    /// infinite`, paused while its section is off screen, read at 0.21. It
+    /// is a frame of the loop, so the fold does not blend it and the pixel
+    /// pass does not read it; the same row at rest at 0.21 still fades.
+    #[test]
+    fn a_paused_loop_through_nothing_is_not_at_rest() {
+        let (mut d, wrap, word) = muted_text_in_wrapper("span", "New announcement", "rgb(10, 16, 21)");
+        d.keyframes.insert(
+            "notif-cycle".into(),
+            vec![
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0".into())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "1".into())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0".into())] },
+            ],
+        );
+        d.set_styles(
+            wrap,
+            &[
+                ("opacity", "0.210098"),
+                ("animationName", "notif-cycle"),
+                ("animationIterationCount", "infinite"),
+                ("animationPlayState", "paused"),
+            ],
+        );
+        d.set_running_animations(wrap, &[]);
+        assert!(low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
+        assert!(super::caught_mid_reveal(&d, word));
+        // Running, the loop is `loops_in_motion`'s; at rest at the same
+        // opacity, the row fades.
+        d.set_style(wrap, "animationPlayState", "running");
+        assert!(!low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
+        assert!(!super::caught_mid_reveal(&d, word));
+        d.set_style(wrap, "animationPlayState", "paused");
+        // A loop that only breathes, and a paused loop at full opacity, are
+        // at rest.
+        d.keyframes.insert(
+            "notif-cycle".into(),
+            vec![
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0.2".into())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "1".into())] },
+            ],
+        );
+        assert!(!low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
+        assert!(!super::caught_mid_reveal(&d, word));
+    }
+
     #[test]
     fn a_faded_box_at_rest_blends_and_a_reveal_mid_frame_does_not() {
         // The accordion header: dark ink inside a box held at half opacity.
@@ -5635,8 +5716,27 @@ mod tests {
     fn a_background_the_walk_read_as_the_text_colour_is_not_a_report() {
         // White label over a hero photo: the background walk sees through the
         // image to the page's own white and would report 1.0:1.
+        let (mut d, wrap, label) = muted_text_in_wrapper("span", "EN", "rgb(255, 255, 255)");
+        let photo = d.add(Some(wrap), "img");
+        visible(&mut d, photo);
+        d.set_styles(photo, &[("position", "absolute")]);
+        d.set_rect(photo, 0.0, 0.0, 300.0, 40.0);
+        let body = d.body().unwrap();
+        stack_at_text(&mut d, label, vec![label, photo, wrap, body]);
+        assert!(colors(&d, label).is_empty(), "{:?}", colors(&d, label));
+        // Where the stacks confirm the label sits on the page's white, it is
+        // still the walk's fallback (a dark JSON viewer, a hidden label in a
+        // white header), and a link or span takes no verdict. On a card of
+        // the page's own that the stacks confirm, the `1.0:1` is real.
         let (d, _wrap, label) = muted_text_in_wrapper("span", "EN", "rgb(255, 255, 255)");
-        assert!(colors(&d, label).is_empty());
+        assert!(colors(&d, label).is_empty(), "{:?}", colors(&d, label));
+        let (mut d, wrap, label) = muted_text_in_wrapper("a", "Start Chat", "rgb(255, 255, 255)");
+        d.set_style(wrap, "backgroundColor", "rgb(255, 255, 255)");
+        assert!(
+            colors(&d, label).iter().any(|h| h.snippet.contains("#ffffff on #ffffff")),
+            "{:?}",
+            colors(&d, label)
+        );
     }
 
     #[test]
@@ -6073,6 +6173,39 @@ mod tests {
         for (x, y) in crate::browser::page_checks::occlusion_probe_points(&rect, vw, vh) {
             d.set_point(x, y, stack.clone());
         }
+    }
+
+    /// juskoe.vercel.app (1002252): nav links at `rgba(46, 45, 45, 0.55)` on
+    /// a fixed pill whose fill is `rgba(255, 255, 255, 0.95)` with a backdrop
+    /// blur, over a violet hero. The walk folds the pill over the page and
+    /// ends there; the stacks meet the pill first, and it is the surface the
+    /// links sit on, so their verdict stands (the live capture prints 3.4:1;
+    /// here the climb also finds the hero and prints the pill over it). Ink
+    /// that reads on the pill still passes.
+    #[test]
+    fn a_near_opaque_pill_is_the_surface_the_stacks_meet() {
+        let nav = |alpha: &str, ink: &str| {
+            let (mut d, body) = page();
+            let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1280.0, 600.0));
+            d.set_style(hero, "backgroundImage", "linear-gradient(rgb(124, 58, 237), rgb(20, 10, 40))");
+            let bar = bare_box(&mut d, body, "nav", (260.0, 20.0, 760.0, 56.0));
+            d.set_styles(bar, &[("position", "fixed"), ("zIndex", "50")]);
+            let pill = bare_box(&mut d, bar, "div", (260.0, 20.0, 760.0, 56.0));
+            d.set_styles(
+                pill,
+                &[
+                    ("backgroundColor", &format!("rgba(255, 255, 255, {alpha})")),
+                    ("backdropFilter", "blur(20px)"),
+                    ("position", "relative"),
+                ],
+            );
+            let a = muted_link(&mut d, pill, ink, (300.0, 38.0, 120.0, 20.0));
+            stack_at_text(&mut d, a, vec![a, pill, bar, hero, body]);
+            low_contrast(&colors(&d, a))
+        };
+        let near_opaque = nav("0.95", "rgba(46, 45, 45, 0.55)");
+        assert_eq!(near_opaque.len(), 1, "{near_opaque:?}");
+        assert!(nav("0.95", "rgb(46, 45, 45)").is_empty());
     }
 
     #[test]
