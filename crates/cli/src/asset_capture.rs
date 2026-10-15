@@ -250,12 +250,25 @@ fn coverage_on_baseline(
         .map_err(|e| format!("baseline decode: {e:?}"))?
         .image;
     let (_, before) = screenshot(page, r)?;
-    let coverage = eval(page, &format!("({})({exclude})", include_str!("raster_coverage.js")))?;
+    page.check_budget()?;
+    let coverage = measure_raster_coverage(page.page, &page.world, exclude)?;
     let (_, after) = screenshot(page, r)?;
     if before.data != baseline.data || after.data != baseline.data {
         return Err("the page no longer shows the captured frame".into());
     }
     Ok(coverage)
+}
+/// Run `raster_coverage.js` with `exclude` (`null` for none) on the page as it
+/// stands. A pseudo-element has no client rect, so the native layout boxes of
+/// every generated `::before`/`::after` that could paint a `url()` are read
+/// first and handed to the measurement, which places each one there.
+pub(crate) fn measure_raster_coverage(page: &mut Page<'_>, world: &IsolatedWorld, exclude: &Value) -> Result<Value, String> {
+    const CANDIDATES: &str = "[...document.querySelectorAll('*')].flatMap((el,index)=>['before','after'].filter(p=>{const s=getComputedStyle(el,'::'+p);return s.content!=='none'&&s.content!=='normal'&&s.display!=='none'&&[s.content,s.backgroundImage,s.borderImageSource,s.maskImage,s.webkitMaskImage,s.clipPath,s.filter].some(v=>typeof v==='string'&&v.includes('url('))}).map(pseudo=>({index,pseudo})))";
+    let candidates = page.evaluate_value_in_world(world, CANDIDATES).map_err(|e| e.message)?;
+    let candidates = candidates.as_array().ok_or("pseudo-element candidates unavailable")?;
+    let pseudos = page.native_pseudo_boxes(world, candidates).map_err(|e| e.message)?;
+    page.evaluate_value_in_world(world, &format!("({})({exclude},{pseudos})", include_str!("raster_coverage.js")))
+        .map_err(|e| e.message)
 }
 struct CapturePage<'p, 'b> {
     page: &'p mut Page<'b>,

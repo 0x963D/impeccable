@@ -23,14 +23,18 @@
 // left out of the count, and `paths` are the declared plates (project paths),
 // whose images are not counted at all. A piece reached through an SVG
 // definition is never treated as a declared plate. With neither, every image
-// counts.
-(exclude) => {
+// counts. `pseudos` are the native layout boxes of the generated
+// ::before/::after boxes (`native_pseudo_boxes` over CDP), where each counts.
+(exclude, pseudos) => {
   const W = innerWidth, H = innerHeight, cell = 4;
   const cols = Math.ceil(W / cell), rows = Math.ceil(H / cell);
   const grid = new Uint8Array(cols * rows);
   const items = [];
   const page = location.href.split('#')[0];
   const boxes = (exclude && exclude.boxes) || [];
+  // Native layout boxes of generated ::before/::after, by host index in
+  // querySelectorAll order and pseudo name (`{index, pseudo, box}`).
+  const native = new Map((pseudos || []).filter(q => q.box).map(q => [q.index + q.pseudo, q.box]));
   // A resource is named by origin and path: the snapshot server ignores the
   // query string, and a fragment never reaches it, so `art.png?v=2` is the plate.
   const resource = u => u.origin + u.pathname;
@@ -210,7 +214,7 @@
     }
     return (px(s.strokeWidth) ?? 1) * k / 2;
   };
-  for (const el of document.querySelectorAll('*')) {
+  for (const [index, el] of [...document.querySelectorAll('*')].entries()) {
     const s = getComputedStyle(el);
     if (s.display === 'none' || s.visibility !== 'visible' || transparent(el)) continue;
     const r = el.getBoundingClientRect();
@@ -248,18 +252,16 @@
       const own = url(ps.content) || url(ps.backgroundImage) || url(ps.borderImageSource) || url(ps.maskImage) || url(ps.webkitMaskImage) || url(ps.clipPath);
       const filtered = url(ps.filter);
       if (!own && !filtered) continue;
-      // A pseudo-element has no client rect. With a used pixel size, count that
-      // size (at the viewport origin when fixed, else at the host's corner);
-      // without one, count the host box. Its clipping chain starts at the host.
-      // A raster filter paints its filter region around that box instead.
+      // A pseudo-element has no client rect, so it counts at its native layout
+      // box (the caller reads it over CDP; offsets, size and transforms all
+      // applied). One with no layout box of its own (display: contents lays
+      // its generated content out in the host's flow) counts the host box.
+      // Its clipping chain starts at the host. A raster filter paints its
+      // filter region around that box instead.
       const mode = ps.position === 'fixed' || ps.position === 'absolute' ? ps.position : 'static';
-      const w = px(ps.width), h = px(ps.height);
       const srcs = [ps.content, ps.backgroundImage, ps.borderImageSource, ps.maskImage, ps.webkitMaskImage, ps.clipPath].flatMap(srcsOf);
-      let pr = box(r);
-      if (w != null && h != null) {
-        const left = mode === 'fixed' ? (px(ps.left) ?? 0) : r.left, top = mode === 'fixed' ? (px(ps.top) ?? 0) : r.top;
-        pr = { left, top, right: left + w, bottom: top + h };
-      }
+      const laid = native.get(index + p);
+      const pr = laid ? { left: laid.x, top: laid.y, right: laid.x + laid.w, bottom: laid.y + laid.h } : box(r);
       if (own) mark(el, mode, pr, name(el) + p, srcs);
       if (filtered) mark(el, mode, region(ps.filter, pr), name(el) + p + ' filter');
     }

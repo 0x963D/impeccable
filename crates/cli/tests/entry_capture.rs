@@ -241,6 +241,30 @@ fn honest_raster_page_with_the_comp_in_the_project_still_passes() {
     }
 }
 
+/// A `::before` counts where it paints, not at its host's corner: a plate placed
+/// by offsets (or a transform) inside its declared region passes, and an
+/// undeclared image pushed outside the region from a host inside it is refused.
+#[test]
+fn pseudo_element_images_count_at_their_painted_box() {
+    if !browser_available() {
+        return;
+    }
+    let f = Fixture::visible();
+    // The hero frame is 200x200 with the art region at 20..100 on both axes.
+    let host = "<div class=h style='position:absolute;left:20px;top:120px;width:80px;height:60px'></div>";
+    for place in ["left:0;top:-100px", "left:0;top:0;transform:translateY(-100px)"] {
+        f.page(&format!("{host}<style>.h::before{{content:'';position:absolute;{place};width:80px;height:80px;background:url(assets/art.png) 0 0/100% 100%}}</style>"));
+        let captured = CdpEntryRenderer.capture_entry(&f.request(EntryStage::Hero)).unwrap();
+        let share = captured.evidence().report["frameProofs"]["hero"]["rasterCoverage"]["share"].as_f64().unwrap();
+        assert!(share < 0.01, "{place}: {share}");
+    }
+    let other = png_io::encode_png(&raster::create_image(32, 32, [20, 90, 200, 255]), &[]).unwrap();
+    fs::write(f.0.join("assets/other.png"), other).unwrap();
+    f.page("<div class=h style='position:absolute;left:20px;top:20px;width:80px;height:80px'></div><style>.h::before{content:'';position:absolute;left:-20px;top:100px;width:100px;height:80px;background:url(assets/other.png) 0 0/100% 100%}</style>");
+    let e = refusal(&CdpEntryRenderer, &f, EntryStage::Hero);
+    assert!(e.contains("outside the declared raster regions cover 20%") && e.contains("div.h::before"), "{e}");
+}
+
 /// Mobile reflows away from the comp, so a declared plate counts nowhere there,
 /// whatever its query string and whether it paints as an image or a pseudo-element.
 #[test]
