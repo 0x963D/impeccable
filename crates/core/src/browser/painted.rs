@@ -1083,7 +1083,9 @@ const PLACED_CONTENT_MIN_SHARE: f64 = 0.5;
 /// holds its markers as small absolutely placed boxes: chefsspecial.app's
 /// Mapbox box (896x800, `overflow: hidden`) records a scroll height of 1,626
 /// from markers placed below its edge, and those are clipped, not scrolled
-/// to. A placed box's own subtree is not read, and a fixed one adds nothing.
+/// to. A placed box under half the frame's height is not read further; a
+/// taller one (a wrapper at `inset: 0`) is read like the frame's own flow,
+/// and a fixed one adds nothing.
 /// A box the capture did not measure, text of `p`'s own, or a walk past
 /// [`IN_FLOW_WALK_BUDGET`] answers yes, which keeps the frame.
 fn content_runs_past(dom: &dyn Dom, p: ElId, frame: &Rect) -> bool {
@@ -1107,9 +1109,16 @@ fn content_runs_past(dom: &dyn Dom, p: ElId, frame: &Rect) -> bool {
         match dom.style(c, "position").as_str() {
             "fixed" => continue,
             "absolute" => {
-                if r.top < bottom - 1.0 && r.bottom > bottom + 1.0 && r.height >= frame.height * PLACED_CONTENT_MIN_SHARE {
+                if r.height < frame.height * PLACED_CONTENT_MIN_SHARE {
+                    continue;
+                }
+                if r.top < bottom - 1.0 && r.bottom > bottom + 1.0 {
                     return true;
                 }
+                // A placed wrapper that fills the frame (`position: absolute;
+                // inset: 0`, as some smooth-scroll setups hold the page) holds
+                // the content in its own flow: read it.
+                stack.extend(dom.children(c));
                 continue;
             }
             _ => {}
@@ -3264,6 +3273,17 @@ mod tests {
         // most of the frame's height, that starts inside it and runs past.
         d.set_rect(content, 0.0, 0.0, 896.0, 400.0);
         assert_eq!(why(&d, count), Some(Unpainted::ClippedOut));
+        // A placed wrapper the frame's own height (`absolute; inset: 0`)
+        // holding in-flow content that runs past is a smooth-scroll frame.
+        let wrapper = d.add(Some(map), "div");
+        d.set_style(wrapper, "position", "absolute");
+        d.set_rect(wrapper, 0.0, 0.0, 896.0, 800.0);
+        let sections = d.add(Some(wrapper), "div");
+        d.set_rect(sections, 0.0, 0.0, 896.0, 2100.0);
+        assert_eq!(why(&d, count), None);
+        d.set_rect(sections, 0.0, 0.0, 896.0, 600.0);
+        assert_eq!(why(&d, count), Some(Unpainted::ClippedOut));
+
         let screen = d.add(Some(map), "div");
         d.set_style(screen, "position", "absolute");
         d.set_rect(screen, 0.0, 700.0, 896.0, 707.0);
