@@ -4420,6 +4420,106 @@ fn painted_overflow_extent(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<(f64,
     Some((reach_left, reach_right))
 }
 
+/// The fewest pixels a spill past a painted box's edge counts at, under the
+/// quarter em ([`SPILL_MEETS_EM`]) of small type.
+const PAINTED_SPILL_MIN_PX: f64 = 2.0;
+
+/// How far `el`'s own text runs out of the box `el` paints, when it does:
+/// the text overruns the content box by [`TEXT_OVERFLOW_MIN_PX`] or more
+/// and reaches past the border box, onto whatever lies outside the fill or
+/// the border, by a quarter em or more. sysco.com's 360px green button sets
+/// a 12.8px uppercase label 46px past its content box: it uses up the 40px
+/// right padding and ends 5.7px outside the button, where its last letter
+/// is white on the near-white section. `scrollWidth` measures the padding
+/// box, so that spill reads 7px and the scroll test passes it over.
+///
+/// Only a box a reader can see the edge of counts: a fill that differs from
+/// the surface under it, a background image, or a drawn border. A box that
+/// clips x overflow cuts the text at its padding edge instead, so nothing
+/// paints past it. A label that only eats into its padding stays inside the
+/// box and is left alone, and so is a box whose own text the capture did not
+/// measure. A trailing letter space ends the text rect past the last glyph,
+/// so it is taken off the end the text runs past. The text has to cross
+/// the content box: text indented wholly out of it (image replacement with
+/// nothing clipping it) is placed there, not running out.
+fn spill_past_painted_box(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<f64> {
+    if !generates_box(dom, el) {
+        return None;
+    }
+    if matches!(crate::browser::text_geometry::overflow_x(dom, el).as_str(), "hidden" | "clip") {
+        return None;
+    }
+    let own = dom.direct_text_rect(el)?;
+    if !(own.all_finite() && own.width > 0.0 && own.height > 0.0 && rect.all_finite() && rect.width > 0.0) {
+        return None;
+    }
+    let pad = |side: &str| {
+        let n = style_px(dom, el, &format!("padding{side}"));
+        if n.is_finite() {
+            n
+        } else {
+            0.0
+        }
+    };
+    let content_left = rect.left + dom.client_left(el) + pad("Left");
+    let content_right = rect.left + dom.client_left(el) + dom.client_width(el) - pad("Right");
+    if !(content_left.is_finite() && content_right.is_finite()) {
+        return None;
+    }
+    let font_size = {
+        let n = style_px(dom, el, "fontSize");
+        if n.is_finite() && n > 0.0 {
+            n
+        } else {
+            16.0
+        }
+    };
+    let tracking = {
+        let n = style_px(dom, el, "letterSpacing");
+        if n.is_finite() && n > 0.0 {
+            n
+        } else {
+            0.0
+        }
+    };
+    let rtl = dom.style(el, "direction") == "rtl";
+    let (text_left, text_right) = if rtl {
+        (own.left + tracking, own.right)
+    } else {
+        (own.left, own.right - tracking)
+    };
+    // Text set wholly outside its box (an image-replacement indent of
+    // -9999px with nothing clipping it) is placed elsewhere, not running
+    // out: it has to cross the content box. A centred label that overflows
+    // both sides does.
+    if !(text_left < content_right && text_right > content_left) {
+        return None;
+    }
+    let past_content = js::math_max(text_right - content_right, content_left - text_left);
+    let past_border = js::math_max(text_right - rect.right, rect.left - text_left);
+    // Text rects are fractional while the old reading was whole pixels:
+    // the same one pixel of slack as `painted_overflow_extent`.
+    if past_content < TEXT_OVERFLOW_MIN_PX - 1.0 || past_border < js::math_max(font_size * SPILL_MEETS_EM, PAINTED_SPILL_MIN_PX) {
+        return None;
+    }
+    if !(super::page_checks::fill_differs_from_surface(dom, el) || draws_a_border(dom, el)) {
+        return None;
+    }
+    Some(past_border)
+}
+
+/// Whether `el` draws a border a reader sees on any side: a width over 0, a
+/// style that draws, and a colour that is not transparent.
+fn draws_a_border(dom: &dyn Dom, el: ElId) -> bool {
+    ["Top", "Right", "Bottom", "Left"].iter().any(|s| {
+        let style = dom.style(el, &format!("border{s}Style"));
+        style_px(dom, el, &format!("border{s}Width")) > 0.0
+            && style != "none"
+            && style != "hidden"
+            && !measures::css_color_is_transparent(Some(&dom.style(el, &format!("border{s}Color"))))
+    })
+}
+
 /// How close, in ems of the spilling text, a spill has to come to another
 /// box or to the viewport edge to meet it: a quarter em, under a word space,
 /// where two runs read as one ("99.99%<50ms").
@@ -4691,6 +4791,11 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
     if generates_box(dom, el) && truncates_by_design(dom, el) {
         return Vec::new();
     }
+    // A box still opening (a typewriter heading's width running from 0)
+    // spills only until its animation ends.
+    if crate::browser::painted::resizes_mid_animation(dom, el) {
+        return Vec::new();
+    }
     let client_width = dom.client_width(el);
     let delta = dom.scroll_width(el) - client_width;
     if client_width > 0.0 && delta >= TEXT_OVERFLOW_MIN_PX {
@@ -4698,17 +4803,26 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
             return Vec::new();
         };
         let content_left = rect.left + dom.client_left(el);
-        if !spill_does_harm(dom, el, (content_left, content_left + client_width), reach) {
-            return Vec::new();
+        if spill_does_harm(dom, el, (content_left, content_left + client_width), reach) {
+            return vec![RuleHit::new(
+                "text-overflow",
+                format!(
+                    "{} overflows its box by {}px",
+                    class_selector(dom, el),
+                    round_str(delta)
+                ),
+            )];
         }
-        return vec![RuleHit::new(
-            "text-overflow",
-            format!(
-                "{} overflows its box by {}px",
-                class_selector(dom, el),
-                round_str(delta)
-            ),
-        )];
+        // A spill into free space still leaves a box that paints its edge,
+        // which the test below reads.
+    }
+    if client_width > 0.0 {
+        if let Some(spill) = spill_past_painted_box(dom, el, &rect) {
+            return vec![RuleHit::new(
+                "text-overflow",
+                format!("{} overflows its box by {}px", class_selector(dom, el), round_str(spill)),
+            )];
+        }
     }
     if client_width == 0.0 && rect.width > 0.0 {
         let mut container = dom.parent(el);
@@ -8275,6 +8389,139 @@ mod tests {
         // With visible overflow the label really lands 9,999px away.
         d.set_styles(tab, &[("overflow", "visible"), ("overflowX", "visible"), ("overflowY", "visible")]);
         assert_eq!(check_element_text_overflow_dom(&d, tab).len(), 1);
+    }
+
+    /// sysco.com miss 452: a 360px green button (40px side padding) sets a
+    /// nowrap 12.8px label 46px past its content box and 5.7px past its own
+    /// right edge, onto the near-white section. `scrollWidth` reads 7px
+    /// over the padding box, under the 16px floor; the text rect against
+    /// the painted box is the measure.
+    #[test]
+    fn text_overflow_reads_text_running_out_of_its_painted_box() {
+        let build = |text_width: f64, fill: &str| {
+            let (mut d, body) = page();
+            let btn = d.add(Some(body), "a");
+            visible(&mut d, btn);
+            d.add_text(btn, "Learn More About Sysco's Cutting Edge Solutions");
+            d.set_rect(btn, 15.0, 4158.7, 360.0, 40.4);
+            d.el_mut(btn).client_width = 358.0;
+            d.el_mut(btn).client_left = 1.0;
+            d.el_mut(btn).scroll_width = 365.0;
+            d.set_text_rect(btn, 56.0, 4170.3, text_width, 16.0);
+            d.set_styles(
+                btn,
+                &[
+                    ("display", "inline-block"),
+                    ("overflowX", "visible"),
+                    ("overflow", "visible"),
+                    ("whiteSpace", "nowrap"),
+                    ("position", "static"),
+                    ("fontSize", "12.8px"),
+                    ("paddingLeft", "40px"),
+                    ("paddingRight", "40px"),
+                    ("backgroundColor", fill),
+                    ("color", "rgb(255, 255, 255)"),
+                ],
+            );
+            d
+        };
+        let d = build(324.66, "rgb(86, 177, 70)");
+        let btn = d.query_one(None, "a").unwrap().unwrap();
+        let hits = check_element_text_overflow_dom(&d, btn);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.ends_with("overflows its box by 6px"), "{}", hits[0].snippet);
+
+        // A label that eats into its padding but ends inside the button.
+        let d = build(316.0, "rgb(86, 177, 70)");
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "inside the border box");
+        // A box that paints nothing has no edge to run out of.
+        let d = build(324.66, "rgba(0, 0, 0, 0)");
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "no painted edge");
+        // A fill the same as the page under it shows no edge either.
+        let d = build(324.66, "rgb(255, 255, 255)");
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "a fill like the page");
+        // A drawn border is an edge.
+        let mut d = build(324.66, "rgba(0, 0, 0, 0)");
+        d.set_styles(btn, &[("borderRightWidth", "1px"), ("borderRightStyle", "solid"), ("borderRightColor", "rgb(86, 177, 70)")]);
+        assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 1, "a bordered box");
+        // A box that clips x overflow cuts the label at its padding edge.
+        let mut d = build(324.66, "rgb(86, 177, 70)");
+        d.set_styles(btn, &[("overflowX", "hidden"), ("overflow", "hidden")]);
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "clipped");
+        // Text indented wholly out of the box (image replacement with
+        // nothing clipping it) is placed there, not running out.
+        let mut d = build(324.66, "rgb(86, 177, 70)");
+        d.set_text_rect(btn, -9943.0, 4170.3, 324.66, 16.0);
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "an indent of -9999px");
+        // A centred label that overflows both sides crosses the box.
+        let mut d = build(324.66, "rgb(86, 177, 70)");
+        d.set_text_rect(btn, 29.0, 4170.3, 332.0, 16.0);
+        assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 0, "inside the border box both sides");
+        d.set_text_rect(btn, 9.0, 4170.3, 372.0, 16.0);
+        assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 1, "6px out of both sides");
+        // Trailing tracking ends the rect past the last glyph.
+        let mut d = build(324.66, "rgb(86, 177, 70)");
+        d.set_style(btn, "letterSpacing", "4px");
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "the overshoot is a letter space");
+    }
+
+    /// lockheedmartin.com 10046719: a section heading types itself out, its
+    /// box's width animating from 0 to 100% once over two seconds. Caught
+    /// part way, the 441px heading spills 103px out of a 338px box that ends
+    /// wide enough to hold it. An endless or paused resize, or one the page
+    /// does not trace, is where the box stands.
+    #[test]
+    fn text_overflow_skips_a_box_still_opening() {
+        let (mut d, body) = page();
+        let col = d.add(Some(body), "div");
+        d.set_rect(col, 49.0, 4431.0, 690.0, 24.0);
+        d.el_mut(col).client_width = 690.0;
+        let heading = d.add(Some(col), "div");
+        visible(&mut d, heading);
+        d.add_text(heading, "Stay Informed: The Latest News on the BLACK HAWK");
+        d.set_rect(heading, 97.0, 4431.0, 338.0, 24.0);
+        d.el_mut(heading).client_width = 338.0;
+        d.el_mut(heading).scroll_width = 441.0;
+        d.set_text_rect(heading, 97.0, 4433.0, 440.6, 20.0);
+        d.set_styles(
+            heading,
+            &[
+                ("display", "block"),
+                ("overflow", "hidden"),
+                ("overflowX", "hidden"),
+                ("overflowY", "hidden"),
+                ("whiteSpace", "nowrap"),
+                ("position", "static"),
+                ("fontSize", "20px"),
+            ],
+        );
+        assert_eq!(check_element_text_overflow_dom(&d, heading).len(), 1, "at rest it is a spill");
+        d.set_styles(
+            heading,
+            &[
+                ("animationName", "typing"),
+                ("animationIterationCount", "1"),
+                ("animationPlayState", "running"),
+                ("animationTimeline", "auto"),
+            ],
+        );
+        d.keyframes.insert(
+            "typing".to_string(),
+            vec![
+                crate::browser::dom::KeyframeFrame { decls: vec![("width".to_string(), "0px".to_string())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("width".to_string(), "100%".to_string())] },
+            ],
+        );
+        assert_eq!(check_element_text_overflow_dom(&d, heading).len(), 1, "not seen running");
+        d.set_running_animations(heading, &["width"]);
+        assert!(check_element_text_overflow_dom(&d, heading).is_empty(), "the box is still opening");
+        d.set_style(heading, "animationIterationCount", "infinite");
+        assert_eq!(check_element_text_overflow_dom(&d, heading).len(), 1, "an endless loop");
+        d.set_styles(heading, &[("animationIterationCount", "1"), ("animationPlayState", "paused")]);
+        assert_eq!(check_element_text_overflow_dom(&d, heading).len(), 1, "a paused resize");
+        d.set_style(heading, "animationPlayState", "running");
+        d.set_running_animations(heading, &["opacity"]);
+        assert_eq!(check_element_text_overflow_dom(&d, heading).len(), 1, "a fade, not a resize");
     }
 
     /// observations-47 row 2: valero.com's icon-font social links clip on

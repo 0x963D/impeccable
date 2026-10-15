@@ -55,6 +55,15 @@
     .icon-link { display: block; width: 30px; height: 30px; overflow: hidden; font-size: 24px; line-height: 24px; white-space: nowrap; color: #036; }
     .icon-link::before { content: "\2605"; display: block; width: 30px; height: 30px; margin-bottom: 4px; line-height: 30px; text-align: center; }
 .icon-link.crosses::before { height: 20px; margin-bottom: 0; line-height: 20px; }
+    /* A filled button 200px wide with 40px side padding, its label set in
+       16px monospace (about 9.6px a letter) on one line. The flag row needs
+       a monospace face near 0.6em a letter (Menlo, DejaVu Sans Mono,
+       Courier New); at 0.55em (Consolas) its 18 letters end inside the
+       button. */
+    .button-label { display: inline-block; box-sizing: border-box; width: 200px; padding: 8px 40px; background: #1f6f2a; color: #fff; font: 16px/20px monospace; white-space: nowrap; }
+    .typing { width: 360px; overflow: hidden; white-space: nowrap; font-size: 20px; line-height: 24px; }
+    .typing.opening { animation: typing-open 600s linear 1; }
+    @keyframes typing-open { from { width: 120px; } to { width: 360px; } }
   </style>
 </head>
 <body>
@@ -86,12 +95,21 @@
            the label 4px below the box paints inside the margin, and its
            spill shows. -->
       <a class="flag-icon-label-in-clip-margin icon-link" href="#" style="overflow: clip; overflow-clip-margin: 8px">Youtube</a>
+      <!-- An unwrapped code sample that does not scroll: the column cuts it. -->
+      <pre class="box flag-pre-unwrapped" style="overflow: visible">npx impeccable detect --json --no-config ./src/components</pre>
+      <!-- The typing heading below at rest in a box too narrow for it. -->
+      <div class="typing flag-typing-at-rest" style="width: 120px">A heading that types itself out</div>
     </section>
 
-    <!-- PASS column: real scroll regions, preformatted code, wrapping text, scroll ancestors -->
+    <!-- PASS column: real scroll regions, code that scrolls or runs into free space, wrapping text, scroll ancestors -->
     <section class="col pass">
       <div class="box pass-scroll" style="overflow-x: auto; white-space: nowrap">The very same unwrapping line, but inside a genuine horizontal scroll region meant to scroll.</div>
-      <pre class="box pass-pre" style="overflow: visible">a-very-long-preformatted-code-line-that-intentionally-extends-beyond-the-box-width</pre>
+      <!-- Preformatted code in a box that draws no edge runs past it into
+           free space, where nothing cuts or covers it. Code that runs on to
+           the viewport edge, under a clip or out of a drawn box is a spill
+           like any other text (flag-pre-unwrapped). -->
+      <pre class="pass-pre" style="overflow: visible; width: 160px">a-preformatted-line-past-its-box</pre>
+      <pre class="box pass-pre-scroll" style="overflow-x: auto">a-very-long-preformatted-code-line-that-intentionally-extends-beyond-the-box-width</pre>
       <div class="box pass-wrap">Ordinary wrapping paragraph text that stays comfortably within its container.</div>
       <div class="box" style="overflow-x: auto"><span class="pass-inside-scroll" style="white-space: nowrap; display: inline-block">A long line living inside a scroll ancestor, which must not be flagged.</span></div>
       <span class="pass-sr-only-clip-path sr-only sr-only-clip-path">A screen-reader-only label with long text that should never draw a visible overflow finding.</span>
@@ -118,6 +136,10 @@
            links): a block ::before glyph fills the 30px clip and the label
            lays out below it, so none of its width is painted. -->
       <a class="icon-link pass-icon-label-below-clip" href="#">Youtube</a>
+      <!-- A heading that types itself out: its box opens from 120px to 360px
+           over ten minutes, once. Caught part way, the words spill out of a
+           box that ends wide enough to hold them. -->
+      <div class="typing opening pass-typing-opening">A heading that types itself out</div>
       <!-- scrollWidth counts absolutely positioned descendants too. A hover
            tooltip parked above a platform name at opacity 0 (clipto.com) and
            a badge pinned past a tab's corner (coachcall.ai's "Popular") are
@@ -166,6 +188,20 @@
       <span class="flag-under-positioned-box" style="display: block; white-space: nowrap; line-height: 24px">Contact sales at sales@example.com</span>
       <div style="position: absolute; left: 180px; top: 0; width: 60px; height: 24px; background: #036"></div>
     </div>
+  </div>
+
+  <!-- FLAG: the label runs out of the button it paints. 18 letters (about
+       173px) in a 120px content box use up the 40px right padding and end
+       about 13px past the green edge, onto the page. Measured on the padding
+       box (scrollWidth) the spill is under 16px. -->
+  <div class="row">
+    <a class="button-label flag-label-past-button" href="#">SHOP-THE-SOLUTIONS</a>
+  </div>
+
+  <!-- PASS: the same button with 16 letters (about 154px): the label eats
+       into the padding and ends inside the button. -->
+  <div class="row">
+    <a class="button-label pass-label-in-padding" href="#">LEARN-MORE-ABOUT</a>
   </div>
 
   <!-- PASS: a positioned hairline with no text (a 1px grid line) over the

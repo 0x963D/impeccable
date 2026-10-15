@@ -297,6 +297,9 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "flag-under-positioned-box",
             "flag-icon-label-crosses-clip",
             "flag-icon-label-in-clip-margin",
+            "flag-pre-unwrapped",
+            "flag-typing-at-rest",
+            "flag-label-past-button",
         ],
         &[
             "pass-ripple",
@@ -309,6 +312,10 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "pass-hover-tooltip",
             "pass-corner-badge",
             "pass-icon-label-below-clip",
+            "pass-pre",
+            "pass-pre-scroll",
+            "pass-typing-opening",
+            "pass-label-in-padding",
         ],
         "text-overflow",
     );
