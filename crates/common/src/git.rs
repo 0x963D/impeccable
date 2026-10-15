@@ -133,6 +133,15 @@ mod tests {
         std::fs::write(at(&["unrelated", "wt", ".git"]), format!("gitdir: {}\n", bare_git)).unwrap();
         assert_eq!(linked_worktree_checkout(&at(&["unrelated", "wt"])), None);
 
+        // --separate-git-dir: the checkout's `.git` is a file naming the common dir.
+        let sep_git = at(&["sep.git", "worktrees", "wt"]);
+        std::fs::create_dir_all(&sep_git).unwrap();
+        std::fs::write(jsp::join(&[&sep_git, "commondir"]), "../..\n").unwrap();
+        std::fs::create_dir_all(at(&["sep"])).unwrap();
+        std::fs::write(at(&["sep", ".git"]), format!("gitdir: {}\n", at(&["sep.git"]))).unwrap();
+        std::fs::write(at(&["unrelated", "wt", ".git"]), format!("gitdir: {}\n", sep_git)).unwrap();
+        assert_eq!(linked_worktree_checkout(&at(&["unrelated", "wt"])), None);
+
         let _ = std::fs::remove_dir_all(&base);
     }
 
