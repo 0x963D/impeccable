@@ -3101,9 +3101,10 @@ fn is_table_part(dom: &dyn Dom, el: ElId) -> bool {
 const EDGE_FLUSH_PAGE_GUTTER_PX: f64 = 12.0;
 
 /// The distance from the viewport's left and right edges to the scroller's,
-/// on each side where the scroller paints no edge of its own (no fill with
-/// alpha, no border); `0` on a side that paints one or where the viewport
-/// width is unknown, so the card there is judged as before.
+/// on each side where nothing draws an edge at the scroller's clip edge (no
+/// fill with alpha or border on the scroller, no bordered or filled panel
+/// edge within 2px of it); `0` on a side where something does or where the
+/// viewport width is unknown, so the card there is judged as before.
 fn scroller_page_insets(dom: &dyn Dom, scroller: ElId, rect: &Rect) -> (f64, f64) {
     let vw = dom.inner_width();
     if !(vw > 0.0) || !rect.all_finite() {
@@ -3117,9 +3118,31 @@ fn scroller_page_insets(dom: &dyn Dom, scroller: ElId, rect: &Rect) -> (f64, f64
     if fill {
         return (0.0, 0.0);
     }
-    let border = |side: &str| style_px(dom, scroller, &format!("border{side}Width")) > 0.0;
-    let left = if border("Left") { 0.0 } else { rect.left.max(0.0) };
-    let right = if border("Right") { 0.0 } else { (vw - rect.right).max(0.0) };
+    let border = |el: ElId, side: &str| style_px(dom, el, &format!("border{side}Width")) > 0.0;
+    // A panel the scroller fills with no padding draws its edge at the
+    // scroller's clip edge: an ancestor (up to six levels) whose edge on that
+    // side lies within 2px of the scroller's, with a border there or a fill.
+    let panel_edge = |side: &str| {
+        let mut cur = dom.parent(scroller);
+        for _ in 0..6 {
+            let Some(a) = cur else { return false };
+            if Some(a) == dom.body() || Some(a) == dom.document_element() {
+                return false;
+            }
+            let r = dom.rect(a);
+            let at_edge = if side == "Left" { (r.left - rect.left).abs() <= 2.0 } else { (r.right - rect.right).abs() <= 2.0 };
+            if at_edge
+                && (border(a, side)
+                    || parse_any_color(Some(&dom.style(a, "backgroundColor"))).is_some_and(|c| c.alpha_or_one() > 0.0))
+            {
+                return true;
+            }
+            cur = dom.parent(a);
+        }
+        false
+    };
+    let left = if border(scroller, "Left") || panel_edge("Left") { 0.0 } else { rect.left.max(0.0) };
+    let right = if border(scroller, "Right") || panel_edge("Right") { 0.0 } else { (vw - rect.right).max(0.0) };
     (left, right)
 }
 
@@ -5996,6 +6019,33 @@ mod tests {
         assert_eq!(row(16.0, false, -10.0), 1);
         // Under the gutter floor the screen's edge is the edge.
         assert_eq!(row(8.0, false, 4.0), 1);
+
+        // An unpainted scroller filling a bordered panel with no padding:
+        // the panel's border is the edge the card touches.
+        let in_panel = |panel_left: f64| {
+            let mut d = FakeDom::new();
+            d.inner_width = 390.0;
+            let (_h, body) = d.with_page();
+            let panel = d.add(Some(body), "div");
+            d.set_styles(panel, &[("borderLeftWidth", "1px"), ("borderRightWidth", "1px")]);
+            d.set_rect(panel, panel_left, 90.0, 390.0 - 2.0 * panel_left, 220.0);
+            let sc = d.add(Some(panel), "div");
+            d.set_styles(sc, &[("overflowX", "auto"), ("overflow", "auto")]);
+            d.set_rect(sc, 16.0, 100.0, 358.0, 200.0);
+            {
+                let e = d.el_mut(sc);
+                e.client_width = 358.0;
+                e.scroll_width = 900.0;
+            }
+            for x in [20.0, 292.0] {
+                let card = d.add(Some(sc), "article");
+                d.set_styles(card, &[("backgroundColor", "rgb(255, 255, 255)")]);
+                d.set_rect(card, x, 110.0, 260.0, 150.0);
+            }
+            check_edge_flush_cards_dom(&d).len()
+        };
+        assert_eq!(in_panel(15.0), 1, "the panel's border sits at the clip edge");
+        assert_eq!(in_panel(4.0), 0, "the panel's border sits 12px out");
     }
 
     #[test]
