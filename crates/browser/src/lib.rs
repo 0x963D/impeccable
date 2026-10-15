@@ -2045,8 +2045,10 @@ fn analysis_findings(
 /// screenshot pixel fallback for candidates the analyses left unresolved.
 ///
 /// `skip_pixels` leaves out the screenshot reads (an attached page that is
-/// hidden). On an attached page a read that fails ends the reads instead of
-/// the scan, and the third value says why.
+/// hidden). On an attached page a screenshot that times out
+/// ([`is_screenshot_stall`]) ends the reads instead of the scan, and the
+/// third value says why; any other error (the document navigated, the
+/// connection closed) still fails the scan.
 #[allow(clippy::too_many_arguments)]
 fn run_visual_contrast_fallback(
     page: &mut Page<'_>,
@@ -2169,7 +2171,7 @@ fn run_visual_contrast_fallback(
         });
         let result = match read {
             Ok(r) => r,
-            Err(e) if page.is_attached() => {
+            Err(e) if page.is_attached() && is_screenshot_stall(&e.message) => {
                 stalled = Some(e.message);
                 break;
             }
@@ -2201,6 +2203,13 @@ fn run_visual_contrast_fallback(
         );
     }
     Ok((findings, superseded, stalled))
+}
+
+/// Whether a pixel read failed because its screenshot timed out (a window
+/// that paints no frames), as opposed to a page that navigated or a
+/// connection that closed.
+fn is_screenshot_stall(message: &str) -> bool {
+    message.starts_with("Page.captureScreenshot timed out")
 }
 
 /// The colour pair a pixel-pass finding reports: the candidate's ink, its
@@ -2246,6 +2255,16 @@ fn truthy(v: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_screenshot_timeout_is_a_stall() {
+        assert!(is_screenshot_stall(
+            "Page.captureScreenshot timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed."
+        ));
+        assert!(!is_screenshot_stall("isolated capture context was destroyed or document changed"));
+        assert!(!is_screenshot_stall("Protocol error: connection closed (IO error)"));
+        assert!(!is_screenshot_stall("Runtime.evaluate timed out. Increase the 'protocolTimeout' setting"));
+    }
 
     #[test]
     fn a_routed_pixel_pair_reports_once_per_page() {

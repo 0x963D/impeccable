@@ -412,16 +412,18 @@ fn scan_target(browser: &mut Browser, target: &PageTarget, options: &ScanOptions
         .and_then(|_| scan_attached(&mut page, &url, options));
     let restored = page.evaluate_value(RESTORE_JS);
     page.close();
-    let mut scan = scanned?;
+    let scan = scanned?;
+    // Leaving the page as found is part of the contract: a scan that could
+    // not put it back fails, so automation sees it.
     let restored_ok = restored.as_ref().is_ok_and(|v| v.get("restored").and_then(Value::as_bool) == Some(true));
     if !restored_ok {
         let why = match restored {
             Err(e) => e.message,
             Ok(_) => "the recorded state was gone".to_string(),
         };
-        scan.notes.push(format!(
-            "Could not put {url} back as it was after the scan ({why}); check its scroll position and any video it was playing."
-        ));
+        return Err(EngineError::new(format!(
+            "scanned {url} but could not put it back as it was ({why}); check its scroll position and any video it was playing."
+        )));
     }
     Ok(scan)
 }
