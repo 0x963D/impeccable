@@ -108,15 +108,28 @@ pub fn instructions_for_event(event: &Map<String, Value>, self_cmd: &str) -> Opt
                 == Some(&Value::Bool(true));
             let result = event.get("_acceptResult");
             let refused = result.and_then(|r| r.get("handled")) == Some(&Value::Bool(false));
+            // A refused discard always ends with live-complete --discarded:
+            // it refuses while the wrapper is still in source, and it records
+            // the discard even when the poll's own completion never landed.
+            let complete = format!("{} --id {} --discarded", script_cmd(self_cmd, "live-complete"), id);
             Some(if refused {
                 let err = match result.and_then(|r| r.get("error")) {
                     Some(v) if truthy(Some(v)) => js_str(Some(v)),
                     _ => "unknown error".to_string(),
                 };
-                format!(
-                    "Discard did NOT restore the source: {}. If the impeccable-variants wrapper for {} is still in source, replace it with the original element by hand (the VCS diff shows what it replaced). Then poll again.",
-                    err, id
-                )
+                if err == "source_locked" {
+                    format!(
+                        "The source file is briefly locked by a publisher. Re-run {} --id {} --discard (idempotent) until it reports handled; do NOT hand-edit the file. Then run {} and poll again.",
+                        script_cmd(self_cmd, "live-accept"),
+                        id,
+                        complete
+                    )
+                } else {
+                    format!(
+                        "Discard did NOT restore the source: {}. If the impeccable-variants wrapper for {} is still in source, replace it with the original element by hand (the VCS diff shows what it replaced). Then run {} (it refuses while the wrapper remains) and poll again.",
+                        err, id, complete
+                    )
+                }
             } else if ack_ok {
                 "Original restored and durable completion acknowledged; nothing to do. Poll again.".to_string()
             } else {
@@ -461,6 +474,15 @@ mod tests {
         .unwrap();
         assert!(refused.starts_with("Discard did NOT restore the source: Original not found."), "{refused}");
         assert!(!refused.contains("Original restored"), "{refused}");
+        assert!(refused.contains("impeccable live-complete --id ab12cd34 --discarded"), "{refused}");
+        let locked = instructions_for_event(
+            &event(json!({ "handled": false, "mode": "error", "file": "src/App.tsx", "error": "source_locked" })),
+            "impeccable",
+        )
+        .unwrap();
+        assert!(locked.contains("Re-run impeccable live-accept --id ab12cd34 --discard"), "{locked}");
+        assert!(locked.contains("do NOT hand-edit"), "{locked}");
+        assert!(locked.contains("impeccable live-complete --id ab12cd34 --discarded"), "{locked}");
         let restored = instructions_for_event(&event(json!({ "handled": true, "file": "src/App.tsx" })), "impeccable").unwrap();
         assert!(restored.starts_with("Original restored"), "{restored}");
     }

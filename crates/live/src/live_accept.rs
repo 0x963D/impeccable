@@ -660,7 +660,7 @@ fn handle_discard_unlocked(id: &str, lines: &[String], target_file: &str) -> Res
     };
     let is_jsx = is_jsx_file(target_file);
     let (rs, re) = expand_replace_range(&block, lines, is_jsx, id);
-    let original = original_or_refuse(lines, &block, rs, re)
+    let original = original_or_refuse(id, lines, &block, rs, re)
         .ok_or_else(|| format!("{} Source not modified; replace the wrapper with the original element by hand.", ORIGINAL_MISSING))?;
     let indent = leading_ws(&lines[rs]);
     let restored = deindent_content(&original, &indent);
@@ -809,7 +809,7 @@ fn handle_accept_unlocked(
     let Some(variant_content) = extract_variant(lines, &block, variant_num) else {
         return Err(format!("Variant {} not found", variant_num));
     };
-    let original_content = original_or_refuse(lines, &block, rs, re)
+    let original_content = original_or_refuse(id, lines, &block, rs, re)
         .ok_or_else(|| format!("{} Source not modified; finish the accept by hand.", ORIGINAL_MISSING))?;
     let css_content = extract_css(lines, &block, id);
     let variant_text = variant_content.join("\n");
@@ -1154,6 +1154,7 @@ static INSERT_MODE_RE: Lazy<Regex> = Lazy::new(|| {
 /// (`data-impeccable-mode="insert"`) replaced nothing and legitimately has no
 /// slot, so it restores to nothing.
 fn original_or_refuse(
+    id: &str,
     lines: &[String],
     block: &MarkerBlock,
     rs: usize,
@@ -1162,10 +1163,13 @@ fn original_or_refuse(
     if let Some(original) = extract_original(lines, block) {
         return Some(original);
     }
+    // Only this session's own wrapper tag counts: a nested insert, or CSS
+    // that names the attribute, must not exempt a replace wrapper.
     let end = re.min(lines.len().saturating_sub(1));
     lines[rs..=end]
         .iter()
-        .any(|l| INSERT_MODE_RE.is_match(l))
+        .find(|l| has_variant_wrapper_attr(l, id))
+        .is_some_and(|l| INSERT_MODE_RE.is_match(&l[..l.find('>').unwrap_or(l.len())]))
         .then(Vec::new)
 }
 
@@ -1433,6 +1437,30 @@ mod original_slot_tests {
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!out.contains("impeccable-variants"), "{out}");
+    }
+
+    #[test]
+    fn only_the_session_wrapper_tag_can_mark_an_insert() {
+        // A nested insert session and CSS naming the attribute both sit inside
+        // this replace wrapper; neither may exempt it from the refusal.
+        let src = [
+            "<main>",
+            "  <!-- impeccable-variants-start ab12cd34 -->",
+            "  <div data-impeccable-variants=\"ab12cd34\" data-impeccable-variant-count=\"1\" style=\"display: contents\">",
+            "    <style data-impeccable-css=\"ab12cd34\">[data-impeccable-mode=\"insert\"] { outline: 0; }</style>",
+            "    <div data-impeccable-variant=\"1\">",
+            "      <div data-impeccable-variants=\"ef56ab78\" data-impeccable-mode=\"insert\" data-impeccable-variant-count=\"1\"></div>",
+            "    </div>",
+            "  </div>",
+            "  <!-- impeccable-variants-end ab12cd34 -->",
+            "</main>",
+        ];
+        let (dir, path, lines) = scratch("index.html", &src);
+        let err = handle_discard_unlocked("ab12cd34", &lines, &path).unwrap_err();
+        let out = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.starts_with("Original not found"), "{err}");
+        assert_eq!(out, src.join("\n"));
     }
 
     #[test]
