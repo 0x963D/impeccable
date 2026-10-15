@@ -698,8 +698,11 @@ fn landmark_holds_the_page<N: ContextNode>(c: &N) -> bool {
     while let Some(p) = root.parent() {
         root = p;
     }
-    let own = rendered_text_chars(c);
-    let page = rendered_text_chars(&root);
+    // Every label inside the window asks this again, so the page count
+    // stops as soon as it settles the answer: past twice the landmark's
+    // own text, the landmark cannot hold half of it.
+    let own = rendered_text_chars(c, usize::MAX);
+    let page = rendered_text_chars(&root, own.saturating_mul(2).saturating_add(1));
     page > 0 && own * 2 >= page
 }
 
@@ -708,11 +711,15 @@ const SOURCE_TEXT_TAGS: &[&str] = &["script", "style", "noscript", "template"];
 
 /// The non-whitespace characters of the text `n` and its descendants put
 /// on the page. `textContent` would count a `<script>` bundle or a
-/// `<style>` sheet, which can outweigh a page's whole copy.
-fn rendered_text_chars<N: ContextNode>(n: &N) -> usize {
+/// `<style>` sheet, which can outweigh a page's whole copy. Counting stops
+/// once it passes `cap`.
+fn rendered_text_chars<N: ContextNode>(n: &N, cap: usize) -> usize {
     let mut count = 0usize;
     let mut stack = vec![n.clone()];
     while let Some(e) = stack.pop() {
+        if count > cap {
+            break;
+        }
         if SOURCE_TEXT_TAGS.contains(&e.tag().as_str()) {
             continue;
         }
