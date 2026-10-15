@@ -104,6 +104,16 @@ pub fn automatic_hook_mode(ctx: &Ctx, cwd: &str, env: &Env, provider: &Provider)
             }
         }
     }
+    if provider.id == "claude-code" {
+        let user_settings = jsp::join(&[&crate::util::homedir(env), ".claude", "settings.json"]);
+        if let Some(raw) = read_json(&user_settings) {
+            if let Some(hooks) = raw.get("hooks") {
+                if crate::staleness::js_truthy(hooks) && value_has_hook_marker(hooks) {
+                    return "stop";
+                }
+            }
+        }
+    }
     "none"
 }
 
@@ -856,6 +866,83 @@ mod output_budget_tests {
     #[test]
     fn shell_arg_keeps_the_path_literal() {
         assert_eq!(shell_arg("/work/$client/it's"), "'/work/$client/it'\\''s'");
+    }
+}
+
+#[cfg(test)]
+mod user_scope_hook_tests {
+    use super::automatic_hook_mode;
+    use crate::context::Ctx;
+    use crate::provider::Provider;
+    use crate::util::Env;
+
+    #[test]
+    fn claude_user_settings_supply_automatic_hook_coverage() {
+        let root = std::env::temp_dir().join(format!(
+            "impeccable-user-hook-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let project = root.join("project");
+        let home = root.join("home");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let launcher = home.join(".claude/skills/impeccable/scripts/impeccable");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        let settings = home.join(".claude/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            settings,
+            serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("\"{}\" hook", launcher.to_string_lossy()),
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let project = project.to_string_lossy().into_owned();
+        let home = home.to_string_lossy().into_owned();
+        let ctx = Ctx {
+            has_product: false,
+            product: None,
+            product_path: None,
+            has_design: false,
+            design: None,
+            design_path: None,
+            context_dir: project.clone(),
+            product_context_dir: None,
+            design_context_dir: None,
+            has_surface_brief: false,
+            surface_brief: None,
+            surface_brief_path: None,
+            surface_brief_reason: "none",
+            surface_brief_candidates: vec![],
+            has_visual_implementation: false,
+            platform: None,
+            project_root: project.clone(),
+            repo_root: project.clone(),
+            is_monorepo: false,
+        };
+        let provider = Provider {
+            id: "claude-code".to_string(),
+            command_prefix: "/".to_string(),
+            command: "/impeccable".to_string(),
+            skill_dir: None,
+            self_cmd: "impeccable".to_string(),
+        };
+        let mut env = Env::new();
+        env.insert("HOME".to_string(), home.clone());
+        env.insert("USERPROFILE".to_string(), home);
+
+        assert_eq!(automatic_hook_mode(&ctx, &project, &env, &provider), "stop");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
