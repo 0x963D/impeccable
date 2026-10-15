@@ -1557,6 +1557,11 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     if in_nav_header || has_own_bg || is_positioned || !(width_ratio > 0.5) {
         return None;
     }
+    // Nor does text in a fixed bar laid over the page: a consent bar or a
+    // notice is chrome, as the element's own fixed position is.
+    if in_a_fixed_bar(dom, el) {
+        return None;
+    }
     // Nor does text in a box caught part way through a move that ends.
     if super::painted::moves_mid_animation(dom, el) {
         return None;
@@ -1615,6 +1620,41 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     } else {
         None
     }
+}
+
+/// The share of the viewport's height under which a fixed ancestor is a bar
+/// laid over the page rather than a layer that holds it.
+const FIXED_BAR_MAX_VIEWPORT_SHARE: f64 = 0.5;
+
+/// Whether an ancestor of `el` is a fixed bar: `position: fixed`, measured,
+/// and shorter than half the viewport's height. klimaschutz-niedersachsen.de
+/// (a cookiefirst bar, 196px of an 800px window) and lockheedmartin.com
+/// (`#cookie-bar`, 92px of 844px) set their consent copy in a `<p>` inside a
+/// fixed bar that runs to the window's sides. A fixed layer as tall as the
+/// window is how a smooth-scroll library holds the whole page, so its prose
+/// is still measured, and so is a fixed ancestor the capture did not measure
+/// or a window whose height is unknown. A sticky ancestor is not taken: a
+/// sticky panel holds reading prose in scroll-driven layouts.
+fn in_a_fixed_bar(dom: &dyn Dom, el: ElId) -> bool {
+    let vh = dom.inner_height();
+    if !(vh.is_finite() && vh > 0.0) {
+        return false;
+    }
+    let body = dom.body();
+    let mut cur = dom.parent(el);
+    while let Some(c) = cur {
+        if Some(c) == body {
+            break;
+        }
+        if dom.style(c, "position") == "fixed" {
+            let r = dom.rect(c);
+            if r.all_finite() && r.height > 0.0 && r.height < vh * FIXED_BAR_MAX_VIEWPORT_SHARE {
+                return true;
+            }
+        }
+        cur = dom.parent(c);
+    }
+    false
 }
 
 /// The hit, at advisory severity when `advisory` holds.
@@ -4626,6 +4666,41 @@ mod tests {
         d.set_style(li, "paddingLeft", "24px");
         d.set_text_rect(li, 42.0, 602.0, 700.0, 20.0);
         assert!(snippets(&d, li, "body-text-viewport-edge").is_empty());
+    }
+
+    /// klimaschutz-niedersachsen.de (10046611) and lockheedmartin.com
+    /// (10046701): consent copy in a `<p>` inside a fixed bar at the window's
+    /// sides. A fixed layer as tall as the window (a smooth-scroll page)
+    /// still measures its prose, and so does a bar the capture did not
+    /// measure.
+    #[test]
+    fn viewport_edge_skips_text_in_a_fixed_bar() {
+        let copy = "We use cookies to measure how the site is used and to improve it for every visitor.";
+        let len = utf16_len(copy);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 1280.0;
+        d.inner_height = 800.0;
+        let bar = d.add(Some(body), "div");
+        d.set_style(bar, "position", "fixed");
+        d.set_rect(bar, 0.0, 604.0, 1280.0, 196.0);
+        let p = text_el(&mut d, bar, "p", copy, "12px");
+        d.set_style(p, "lineHeight", "16px");
+        d.set_rect(p, 15.0, 672.0, 716.0, 34.0);
+        d.set_text_rect(p, 15.0, 673.0, 700.0, 32.0);
+        assert!(snippets(&d, p, "body-text-viewport-edge").is_empty(), "consent bar");
+        // The same copy in a window-tall fixed layer reports.
+        d.set_rect(bar, 0.0, 0.0, 1280.0, 800.0);
+        let want = vec![format!("<p> with {len}-char body bleeds to viewport edge (left 15px)")];
+        assert_eq!(snippets(&d, p, "body-text-viewport-edge"), want, "page layer");
+        // So does a bar with no measured box, and a static wrapper.
+        d.set_rect(bar, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(snippets(&d, p, "body-text-viewport-edge"), want, "unmeasured");
+        d.set_rect(bar, 0.0, 604.0, 1280.0, 196.0);
+        d.set_style(bar, "position", "static");
+        assert_eq!(snippets(&d, p, "body-text-viewport-edge"), want, "static");
+        d.set_style(bar, "position", "sticky");
+        assert_eq!(snippets(&d, p, "body-text-viewport-edge"), want, "sticky");
     }
 
     /// Taste call r3-34: at 480px or less the gutter floor is 12px, above it
