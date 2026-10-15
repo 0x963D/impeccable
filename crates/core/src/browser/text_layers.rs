@@ -539,6 +539,16 @@ pub fn layers_at_text(
 /// it need for the picture to hide what is under it.
 const PICTURE_COVER_MIN_OPACITY: f64 = 0.95;
 
+/// Whether a picture URL names a format that may carry transparency (PNG or
+/// SVG, judged by the path before any query or fragment). The engine cannot
+/// see a picture's alpha, so such a picture is not taken to cover what lies
+/// beneath it.
+pub(crate) fn url_may_be_transparent(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or("");
+    path.ends_with(".png") || path.ends_with(".svg")
+}
+
 /// How far the picture's box may sit from the avatar box on each side.
 const AVATAR_BOX_SLACK: f64 = 3.0;
 
@@ -618,13 +628,8 @@ fn covered_by_a_later_picture(dom: &dyn Dom, el: ElId) -> bool {
             if !loaded || !matches!(dom.style(img, "objectFit").as_str(), "fill" | "cover" | "") {
                 return false;
             }
-            let src = dom
-                .image_current_src(img)
-                .or_else(|| dom.attr(img, "src"))
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let path = src.split(['?', '#']).next().unwrap_or("");
-            if path.ends_with(".svg") || path.ends_with(".png") {
+            let src = dom.image_current_src(img).or_else(|| dom.attr(img, "src")).unwrap_or_default();
+            if url_may_be_transparent(&src) {
                 return false;
             }
             let r = dom.rect(img);

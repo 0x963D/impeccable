@@ -3320,19 +3320,16 @@ fn share_left_by_covering_media(dom: &dyn Dom, el: ElId, rect: &Rect) -> f64 {
             // A video paints nothing until a frame is decoded, or ever when
             // autoplay is blocked or the source fails; its poster paints
             // from the start.
-            "video" => dom.attr(media, "poster").is_some_and(|v| !js::trim(&v).is_empty()),
-            // A PNG or SVG may be a transparent texture the glow shows
-            // through; the engine cannot see its alpha.
+            // A PNG or SVG poster or image may be a transparent texture the
+            // glow shows through; the engine cannot see its alpha.
+            "video" => dom.attr(media, "poster").is_some_and(|v| {
+                !js::trim(&v).is_empty() && !crate::browser::text_layers::url_may_be_transparent(&v)
+            }),
             "img" => {
-                let src = dom
-                    .image_current_src(media)
-                    .or_else(|| dom.attr(media, "src"))
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                let path = src.split(['?', '#']).next().unwrap_or("");
+                let src = dom.image_current_src(media).or_else(|| dom.attr(media, "src")).unwrap_or_default();
                 dom.image_complete(media) == Some(true)
                     && dom.image_natural_size(media).is_some_and(|(w, h)| w > 0.0 && h > 0.0)
-                    && !(path.ends_with(".png") || path.ends_with(".svg"))
+                    && !crate::browser::text_layers::url_may_be_transparent(&src)
             }
             _ => false,
         };
@@ -7348,6 +7345,24 @@ mod tests {
         assert_eq!(run("/images/hero.jpg"), 0);
         assert_eq!(run("/images/grain.png?v=3"), 1);
         assert_eq!(run("/images/noise.svg"), 1);
+    }
+
+    /// Review: a video poster gets the same PNG / SVG exclusion as an image,
+    /// since a transparent poster leaves the glow showing.
+    #[test]
+    fn radial_spotlight_sees_through_a_png_or_svg_poster() {
+        let run = |poster: &str| {
+            let (mut d, section, glow) =
+                dark_page_with_glow("radial-gradient(circle, rgba(171, 151, 116, 0.35) 0%, transparent 28%)");
+            let video = d.add(Some(section), "video");
+            d.set_attr(video, "poster", poster);
+            d.set_styles(video, &[("position", "absolute"), ("opacity", "1"), ("objectFit", "cover")]);
+            d.set_rect(video, 0.0, 0.0, 803.0, 502.0);
+            check_element_radial_spotlight_dom(&d, glow).len()
+        };
+        assert_eq!(run("/images/poster.jpg"), 0);
+        assert_eq!(run("/images/poster.PNG?v=2"), 1);
+        assert_eq!(run("/images/poster.svg#frame"), 1);
     }
 
     /// Review: a full-size photo faded out by a `mask-image`, or cut by a
