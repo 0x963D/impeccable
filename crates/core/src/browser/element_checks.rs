@@ -4728,38 +4728,47 @@ fn spill_meets_another_box(
 }
 
 /// The part of `extent` (`(left, right)`, the box and text of `el`) that
-/// the boxes clipping x overflow around it leave painted: `el` itself and
-/// each ancestor below the body that hides or clips x overflow cut it at
-/// their padding box. `None` when nothing is left. A clip with no measured
-/// area cuts nothing here; the paint gate decides what it hides.
+/// the boxes clipping x overflow around it leave painted: `el` itself, and
+/// each ancestor below the body whose overflow can clip it (an absolute or
+/// fixed box escapes a clip below its containing block), cut it at their
+/// padding box, or past it by the clip margin of `overflow: clip`. `None`
+/// when nothing is left. A clip with no measured area cuts nothing here;
+/// the paint gate decides what it hides.
 fn clip_x_extent(dom: &dyn Dom, el: ElId, extent: (f64, f64)) -> Option<(f64, f64)> {
     let (mut left, mut right) = extent;
-    let root = dom.document_element();
-    let body = dom.body();
-    let mut cur = Some(el);
-    while let Some(c) = cur {
-        if Some(c) == root || Some(c) == body {
-            break;
+    let mut clips = vec![el];
+    clips.extend(crate::browser::painted::clipping_ancestors(dom, el));
+    for c in clips {
+        if !generates_box(dom, c) {
+            continue;
         }
-        if generates_box(dom, c)
-            && matches!(crate::browser::text_geometry::overflow_x(dom, c).as_str(), "hidden" | "clip")
-        {
-            let r = dom.rect(c);
-            if r.all_finite() && r.width > 0.0 && r.height > 0.0 {
-                let client = dom.client_width(c);
-                let (l, rr) = if client.is_finite() && client > 0.0 {
-                    let l = r.left + dom.client_left(c);
-                    (l, l + client)
-                } else {
-                    (r.left, r.right)
-                };
-                if l.is_finite() && rr.is_finite() {
-                    left = js::math_max(left, l);
-                    right = js::math_min(right, rr);
-                }
-            }
+        let margin = match crate::browser::text_geometry::overflow_x(dom, c).as_str() {
+            "hidden" => 0.0,
+            // A margin the capture did not record clips at the padding box.
+            "clip" => dom
+                .style(c, "overflowClipMargin")
+                .split_whitespace()
+                .map(parse_float)
+                .find(|n| n.is_finite())
+                .filter(|n| *n > 0.0)
+                .unwrap_or(0.0),
+            _ => continue,
+        };
+        let r = dom.rect(c);
+        if !(r.all_finite() && r.width > 0.0 && r.height > 0.0) {
+            continue;
         }
-        cur = dom.parent(c);
+        let client = dom.client_width(c);
+        let (l, rr) = if client.is_finite() && client > 0.0 {
+            let l = r.left + dom.client_left(c);
+            (l, l + client)
+        } else {
+            (r.left, r.right)
+        };
+        if l.is_finite() && rr.is_finite() {
+            left = js::math_max(left, l - margin);
+            right = js::math_min(right, rr + margin);
+        }
     }
     (right > left).then_some((left, right))
 }
@@ -5165,6 +5174,56 @@ mod tests {
                 ("backgroundImage", "none"),
             ],
         );
+    }
+
+    /// The part of a box a clip leaves for a spill to run into: an in-flow
+    /// line is cut at its column's edge, a fixed badge only by a containing
+    /// block, and `overflow: clip` paints out to its clip margin.
+    #[test]
+    fn clip_x_extent_cuts_only_what_a_clip_hides() {
+        let (mut d, body) = page();
+        let col = d.add(Some(body), "div");
+        d.set_styles(col, &[("display", "block"), ("overflowX", "hidden")]);
+        for (k, v) in [
+            ("transform", "none"),
+            ("translate", "none"),
+            ("scale", "none"),
+            ("rotate", "none"),
+            ("perspective", "none"),
+            ("filter", "none"),
+            ("backdropFilter", "none"),
+            ("willChange", "auto"),
+            ("contain", "none"),
+        ] {
+            d.set_style(col, k, v);
+        }
+        d.set_rect(col, 0.0, 0.0, 200.0, 400.0);
+        d.el_mut(col).client_width = 200.0;
+        let line = d.add(Some(col), "div");
+        d.set_style(line, "display", "block");
+        assert_eq!(clip_x_extent(&d, line, (0.0, 500.0)), Some((0.0, 200.0)), "in flow: cut at the column");
+        assert_eq!(clip_x_extent(&d, line, (300.0, 500.0)), None, "wholly hidden");
+
+        // A fixed badge the column is not the containing block of paints
+        // past it.
+        let badge = d.add(Some(col), "div");
+        d.set_styles(badge, &[("display", "block"), ("position", "fixed")]);
+        assert_eq!(clip_x_extent(&d, badge, (150.0, 260.0)), Some((150.0, 260.0)), "fixed: not cut");
+        d.set_style(col, "transform", "matrix(1, 0, 0, 1, 0, 0)");
+        assert_eq!(clip_x_extent(&d, badge, (150.0, 260.0)), Some((150.0, 200.0)), "fixed in its containing block");
+        d.set_style(col, "transform", "none");
+        // An absolute box escapes a clip below its containing block.
+        d.set_style(badge, "position", "absolute");
+        assert_eq!(clip_x_extent(&d, badge, (150.0, 260.0)), Some((150.0, 260.0)), "absolute: not cut");
+        d.set_style(col, "position", "relative");
+        assert_eq!(clip_x_extent(&d, badge, (150.0, 260.0)), Some((150.0, 200.0)), "absolute in its containing block");
+        d.set_style(col, "position", "static");
+
+        // `overflow: clip` paints out to its margin.
+        d.set_styles(col, &[("overflowX", "clip"), ("overflowClipMargin", "8px")]);
+        assert_eq!(clip_x_extent(&d, line, (-50.0, 500.0)), Some((-8.0, 208.0)), "clip margin");
+        d.set_style(col, "overflowClipMargin", "content-box 0px");
+        assert_eq!(clip_x_extent(&d, line, (0.0, 500.0)), Some((0.0, 200.0)), "no margin");
     }
 
     /// observations-42 row 6, lance.com.br: a disabled "Confirmar" button,

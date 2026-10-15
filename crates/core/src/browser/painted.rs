@@ -562,6 +562,35 @@ fn unpainted_walk(
     outside_document(dom, &band, vis, viewport_w)
 }
 
+/// The ancestors of `el`, below the body, whose overflow can clip it, by
+/// the placement rules of [`unpainted_inside`]'s walk: an in-flow box is
+/// clipped by every ancestor, an absolute box only from its containing
+/// block up, a fixed box only from a containing ancestor up. An undecided
+/// ancestor is not taken as the containing block.
+pub(crate) fn clipping_ancestors(dom: &dyn Dom, el: ElId) -> Vec<ElId> {
+    let body = dom.body();
+    let root = dom.document_element();
+    let mut placement = Placement::of(dom, el);
+    let mut out = Vec::new();
+    let mut cur = dom.parent(el);
+    while let Some(p) = cur {
+        if Some(p) == body || Some(p) == root {
+            break;
+        }
+        let containment = if placement == Placement::InFlow {
+            Containment::DoesNot
+        } else {
+            contains_fixed(dom, p)
+        };
+        if placement.clipped_by(dom, p, containment) {
+            out.push(p);
+            placement = Placement::of(dom, p);
+        }
+        cur = dom.parent(p);
+    }
+    out
+}
+
 /// How an element's box is placed, which decides which ancestors clip it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Placement {
