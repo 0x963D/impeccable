@@ -351,6 +351,15 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
         if is_kicker_card_context(dom, heading, label) || numbered_label_holds_media(dom, label) {
             continue;
         }
+        // A label or heading a visitor cannot see numbers nothing on screen:
+        // juskoe.vercel.app sets its 13px "01" to "03" in a `md:hidden`
+        // block, at `display: none` on desktop, beside headings that show.
+        // The same gate as the kicker collector's.
+        if unpainted_for(dom, heading, PaintGate::Text).is_some()
+            || unpainted_for(dom, label, PaintGate::Text).is_some()
+        {
+            continue;
+        }
         let label_text = {
             let t = clean_inline_text(dom, label);
             if t.is_empty() {
@@ -933,6 +942,10 @@ mod tests {
             let h = d.add(Some(sec), "h2");
             d.add_text(h, &format!("Section number {}", i + 1));
             d.set_style(h, "fontSize", "28px");
+            // Measured on screen, which the paint gate asks.
+            let y = 100.0 + i as f64 * 200.0;
+            d.set_rect(label, 40.0, y, 20.0, 14.0);
+            d.set_rect(h, 40.0, y + 20.0, 600.0, 34.0);
         }
         let hits = check_numbered_section_labels_dom(&d);
         assert_eq!(hits.len(), 2);
@@ -940,6 +953,55 @@ mod tests {
             hits[0].snippet,
             "tiny numbered label \"01\" beside h2 \"Section number 1\" (2 on page)"
         );
+    }
+
+    /// juskoe.vercel.app (10047099): the small "01" to "03" labels sit in a
+    /// `md:hidden` block at `display: none` on desktop, beside headings a
+    /// visitor sees. The same labels shown report.
+    #[test]
+    fn numbered_labels_a_visitor_cannot_see_are_not_counted() {
+        let build = |hide_labels: bool| {
+            let mut d = FakeDom::new();
+            let (_html, body) = d.with_page();
+            for (i, idx) in ["01", "02", "03"].iter().enumerate() {
+                let y = 100.0 + i as f64 * 300.0;
+                let sec = d.add(Some(body), "section");
+                d.set_rect(sec, 40.0, y, 600.0, 200.0);
+                let mobile = d.add(Some(sec), "div");
+                let label = d.add(Some(mobile), "span");
+                d.add_text(label, idx);
+                d.set_styles(
+                    label,
+                    &[
+                        ("fontSize", "13px"),
+                        ("letterSpacing", "1px"),
+                        ("fontWeight", "700"),
+                        ("fontFamily", "monospace"),
+                        ("textTransform", "none"),
+                        ("color", "rgb(0, 0, 0)"),
+                    ],
+                );
+                if hide_labels {
+                    d.set_style(mobile, "display", "none");
+                    for el in [mobile, label] {
+                        d.el_mut(el).check_visibility = Some(false);
+                        d.set_rect(el, 0.0, 0.0, 0.0, 0.0);
+                    }
+                } else {
+                    d.set_rect(mobile, 40.0, y, 600.0, 18.0);
+                    d.set_rect(label, 40.0, y, 20.0, 18.0);
+                    d.set_text_rect(label, 40.0, y, 20.0, 18.0);
+                }
+                let h = d.add(Some(sec), "h3");
+                d.add_text(h, &format!("Press a hotkey number {}", i + 1));
+                d.set_style(h, "fontSize", "28px");
+                d.set_rect(h, 40.0, y + 24.0, 600.0, 36.0);
+                d.set_text_rect(h, 40.0, y + 24.0, 400.0, 36.0);
+            }
+            d
+        };
+        assert_eq!(check_numbered_section_labels_dom(&build(false)).len(), 3);
+        assert!(check_numbered_section_labels_dom(&build(true)).is_empty());
     }
 
     /// gig-connect-six.vercel.app: a capacity badge, a people icon and a
@@ -977,6 +1039,10 @@ mod tests {
                 let h = d.add(Some(sec), "h2");
                 d.add_text(h, &format!("Venue number {}", i + 1));
                 d.set_style(h, "fontSize", "28px");
+                // Measured on screen, which the paint gate asks.
+                let y = 100.0 + i as f64 * 200.0;
+                d.set_rect(label, 40.0, y, 20.0, 14.0);
+                d.set_rect(h, 40.0, y + 20.0, 600.0, 34.0);
             }
             d
         };
