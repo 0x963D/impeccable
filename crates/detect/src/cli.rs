@@ -678,7 +678,13 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
             Ok(scan) => {
                 all.extend(scan.findings);
                 for note in scan.notes {
-                    if !ctx.design_notes.contains(&note) {
+                    // JSON mode prints no notes, but an attached scan's capture
+                    // notes say which checks did not run (a hidden window skips
+                    // the pixel reads), so they go to stderr there and stdout
+                    // stays the JSON.
+                    if ctx.json_mode {
+                        ctx.io.err(&format!("{note}\n"));
+                    } else if !ctx.design_notes.contains(&note) {
                         ctx.design_notes.push(note);
                     }
                 }
