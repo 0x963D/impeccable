@@ -2464,6 +2464,35 @@ fn quality_input(dom: &dyn Dom, el: ElId, line_max: f64) -> QualityInput {
     }
 }
 
+/// The elements whose text is code or markup, never shown as words.
+const CODE_TEXT_SELECTOR: &str = "script, style, template, noscript";
+
+/// `el`'s `textContent` without the text of `script`, `style`, `template`
+/// and `noscript` descendants. munsifdaily.in writes the Islamic date into
+/// an h5 with an inline `<script>`, so the heading's text content starts
+/// with `document.write(...)`, which no reader sees.
+fn text_without_code(dom: &dyn Dom, el: ElId) -> String {
+    let full = dom.text_content(el);
+    let code = dom.query_all(Some(el), CODE_TEXT_SELECTOR).unwrap_or_default();
+    if code.is_empty() {
+        return full;
+    }
+    let mut out = String::with_capacity(full.len());
+    let mut rest = full.as_str();
+    for c in code {
+        let text = dom.text_content(c);
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(pos) = rest.find(&text) {
+            out.push_str(&rest[..pos]);
+            rest = &rest[pos + text.len()..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// What counts as the page's footer for `skipped-heading`: the element, the
 /// landmark role, or the conventional id.
 pub const FOOTER_SELECTOR: &str = "footer, [role=\"contentinfo\"], #footer";
@@ -2489,7 +2518,7 @@ pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
         // JS `parseInt(h.tagName[1])`
         let level = js::parse_int(&tag.chars().nth(1).map(|c| c.to_string()).unwrap_or_default(), 10);
         let level = if level.is_nan() { 0 } else { level as i64 };
-        let text = slice_utf16_prefix(&collapse_ws(js::trim(&dom.text_content(h))), 60);
+        let text = slice_utf16_prefix(&collapse_ws(js::trim(&text_without_code(dom, h))), 60);
         let footer = dom.closest(h, FOOTER_SELECTOR).ok().flatten();
         let opens_footer = footer.is_some() && footer != prev_footer;
         let into_footer = footer.is_some() && (opens_footer || prev_opens_footer);
@@ -5825,6 +5854,20 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].type_, "skipped-heading");
         assert_eq!(f[0].detail, "<h1> \"Title here\" followed by <h3> \"Sub\" (missing h2)");
+
+        // munsifdaily.in (10046594): the h5 writes its date with an inline
+        // script, whose source is not a word on the page.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let h2 = d.add(Some(body), "h2");
+        d.add_text(h2, "E-Paper");
+        let h5 = d.add(Some(body), "h5");
+        let script = d.add(Some(h5), "script");
+        d.add_text(script, "document.write(writeIslamicDate(-1));");
+        d.add_text(h5, "28 Rabi-uthani 1448 AH");
+        let f = check_page_quality_dom(&d);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].detail, "<h2> \"E-Paper\" followed by <h5> \"28 Rabi-uthani 1448 AH\" (missing h3)");
     }
 
     /// r5-p29: a skip into the footer is chrome; a skip in the content, and
