@@ -206,7 +206,7 @@ test('cmd launcher stages each run under its own name', () => {
   const source = fs.readFileSync(path.join(ROOT, 'skill/scripts/impeccable.cmd'), 'utf8');
   assert.doesNotMatch(source, /%cached%\.(part|sha256)/);
   assert.match(source, /set "staging=[^"\n]*%RANDOM%/);
-  assert.match(source, /mkdir "%staging%" >nul 2>nul\nif errorlevel 1 goto claim_staging/);
+  assert.match(source, /mkdir "%staging%" >nul 2>nul\r?\nif errorlevel 1 goto claim_staging/);
 });
 
 test('cmd launcher forwards engine exit code through cmd /c', { skip: WINDOWS ? false : 'Windows-only cmd /c exit-code forwarding' }, async t => {
