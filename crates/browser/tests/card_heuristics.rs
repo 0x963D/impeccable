@@ -299,8 +299,9 @@ fn label_collectors_climb_and_scale() {
             "Ring Tile",
             "Framer Card Heading",
             "Contents Wrapped Tile",
+            "Emoji In A Span",
         ],
-        &["Far From The Tile", "Sarah Chen", "Inline Side By Side"],
+        &["Far From The Tile", "Sarah Chen", "Inline Side By Side", "Word In A Span"],
     );
 
     let Some(findings) = scan("kicker-above-heading.html") else {

@@ -2305,10 +2305,19 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         )
         .unwrap_or(None)
         .or_else(|| masked_icon_child(dom, sibling));
-    let icon_rect = icon_child.map(|c| dom.rect(c));
     let sib_direct = direct_text(dom, sibling);
     let has_inline_emoji_icon =
         dom.children(sibling).is_empty() && is_emoji_only_text(&sib_direct);
+    // An emoji set in a span of its own inside the tile
+    // (ytbulktranscript.app's `span.text-brand-400` holding one emoji) is the
+    // same icon. Its rect stands for the icon's, so a glyph that fills the
+    // tile is still not a tile around an icon.
+    let emoji_child = if icon_child.is_none() && !has_inline_emoji_icon {
+        emoji_only_child(dom, sibling, &sib_direct)
+    } else {
+        None
+    };
+    let icon_rect = icon_child.or(emoji_child).map(|c| dom.rect(c));
     check_icon_tile(&IconTileOpts {
         heading_tag: tag,
         heading_text: Some(dom.text_content(el)),
@@ -2325,7 +2334,7 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             shadow_ring_px(&dom.style(sibling, "boxShadow")),
         ),
         sibling_border_radius: style_px(dom, sibling, "borderRadius"),
-        has_icon_child: icon_child.is_some() || has_inline_emoji_icon,
+        has_icon_child: icon_child.is_some() || has_inline_emoji_icon || emoji_child.is_some(),
         // JS `iconRect?.width || 0`
         icon_child_width: icon_rect
             .map(|r| r.width)
@@ -2333,6 +2342,20 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             .unwrap_or(0.0),
         heading_is_card_title: card_title,
     })
+}
+
+/// The one child of `tile` that holds its icon as an emoji: the tile's own
+/// text is blank, it has exactly one element child, and that child has no
+/// children of its own and only emoji for text.
+fn emoji_only_child(dom: &dyn Dom, tile: ElId, tile_text: &str) -> Option<ElId> {
+    if !js::trim(tile_text).is_empty() {
+        return None;
+    }
+    let children = dom.children(tile);
+    let [only] = children.as_slice() else {
+        return None;
+    };
+    (dom.children(*only).is_empty() && is_emoji_only_text(&direct_text(dom, *only))).then_some(*only)
 }
 
 /// The weight and size a card title set on a `div` carries: shadcn's
@@ -6497,6 +6520,46 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "icon-tile-stack");
         assert!(hits[0].snippet.contains("\"Lightning Fast\""), "{}", hits[0].snippet);
+    }
+
+    /// ytbulktranscript.app: a tinted 40px tile holds one emoji in a span of
+    /// its own above each feature card's h3. The span is the icon. A span
+    /// holding a word, a second child, or an emoji that fills the tile is not.
+    #[test]
+    fn icon_tile_reads_an_emoji_in_a_child_span() {
+        let build = |text: &str, extra_child: bool, glyph_width: f64| {
+            let (mut d, body) = page();
+            let card = d.add(Some(body), "div");
+            let tile = d.add(Some(card), "div");
+            d.add_text(tile, "\n  ");
+            let span = d.add(Some(tile), "span");
+            d.add_text(span, text);
+            d.set_rect(span, 8.0, 6.0, glyph_width, 28.0);
+            if extra_child {
+                let dot = d.add(Some(tile), "span");
+                d.set_rect(dot, 30.0, 2.0, 6.0, 6.0);
+            }
+            d.set_rect(tile, 0.0, 0.0, 40.0, 40.0);
+            d.set_styles(
+                tile,
+                &[
+                    ("backgroundColor", "rgba(124, 58, 237, 0.2)"),
+                    ("backgroundImage", "none"),
+                    ("borderTopWidth", "0px"),
+                    ("borderRadius", "12px"),
+                ],
+            );
+            let h3 = d.add(Some(card), "h3");
+            d.add_text(h3, "Full Transcripts");
+            d.set_rect(h3, 0.0, 56.0, 300.0, 24.0);
+            check_element_icon_tile_dom(&d, h3)
+        };
+        let hits = build("\u{1F4DD}", false, 25.0);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "40x40px icon tile above h3 \"Full Transcripts\"");
+        assert!(build("AI", false, 25.0).is_empty(), "a word is not an icon");
+        assert!(build("\u{1F4DD}", true, 25.0).is_empty(), "two children");
+        assert!(build("\u{1F4DD}", false, 40.0).is_empty(), "the glyph fills the tile");
     }
 
     /// simplybudget.framer.ai: a paint-free container around a white tile with
