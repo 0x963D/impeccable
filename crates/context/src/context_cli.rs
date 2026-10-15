@@ -102,6 +102,16 @@ pub fn automatic_hook_mode(ctx: &Ctx, cwd: &str, env: &Env, provider: &Provider)
             }
         }
     }
+    if provider.id == "claude-code" {
+        let user_settings = jsp::join(&[&crate::util::homedir(env), ".claude", "settings.json"]);
+        if let Some(raw) = read_json(&user_settings) {
+            if let Some(hooks) = raw.get("hooks") {
+                if crate::staleness::js_truthy(hooks) && value_has_hook_marker(hooks) {
+                    return "stop";
+                }
+            }
+        }
+    }
     "none"
 }
 
@@ -114,7 +124,9 @@ pub fn automatic_hook_mode(ctx: &Ctx, cwd: &str, env: &Env, provider: &Provider)
 /// borrowing an unrelated manifest near the caller. The walk itself is the
 /// authority: do not append repoRoot afterward, because `resolve_project` can
 /// retain an outer workspace root for a target inside an independent nested
-/// Git repository.
+/// Git repository. A linked worktree nested in its own main checkout (Claude
+/// Code's `.claude/worktrees/<name>`) does not stop the walk, so it still finds
+/// the checkout's manifest (#1016); any other `.git` does.
 fn hook_manifest_search_roots(ctx: &Ctx, cwd: &str, env: &Env) -> Vec<String> {
     let mut roots: Vec<String> = Vec::new();
     let mut current = jsp::resolve(if ctx.project_root.is_empty() { cwd } else { &ctx.project_root }, &[]);
@@ -126,7 +138,10 @@ fn hook_manifest_search_roots(ctx: &Ctx, cwd: &str, env: &Env) -> Vec<String> {
         if !roots.contains(&current) {
             roots.push(current.clone());
         }
-        if crate::context::has_git_boundary(&current) {
+        if crate::context::has_git_boundary(&current)
+            && !impeccable_common::git::linked_worktree_checkout(&current)
+                .is_some_and(|checkout| crate::context::is_path_inside(&current, &checkout))
+        {
             break;
         }
         let parent = jsp::dirname(&current);
@@ -731,5 +746,129 @@ mod skill_version_tests {
         assert_eq!(v("---  \nversion: 4.1.3\n---  \n").as_deref(), Some("4.1.3"));
         assert_eq!(v("version: 4.1.3\n"), None);
         assert_eq!(v("---\nversion:\n---\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod user_scope_hook_tests {
+    use super::automatic_hook_mode;
+    use crate::context::Ctx;
+    use crate::provider::Provider;
+    use crate::util::Env;
+
+    #[test]
+    fn claude_user_settings_supply_automatic_hook_coverage() {
+        let root = std::env::temp_dir().join(format!(
+            "impeccable-user-hook-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let project = root.join("project");
+        let home = root.join("home");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let launcher = home.join(".claude/skills/impeccable/scripts/impeccable");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "#!/bin/sh\n").unwrap();
+        let settings = home.join(".claude/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(
+            settings,
+            serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("\"{}\" hook", launcher.to_string_lossy()),
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let project = project.to_string_lossy().into_owned();
+        let home = home.to_string_lossy().into_owned();
+        let ctx = Ctx {
+            has_product: false,
+            product: None,
+            product_path: None,
+            has_design: false,
+            design: None,
+            design_path: None,
+            context_dir: project.clone(),
+            product_context_dir: None,
+            design_context_dir: None,
+            has_surface_brief: false,
+            surface_brief: None,
+            surface_brief_path: None,
+            surface_brief_reason: "none",
+            surface_brief_candidates: vec![],
+            has_visual_implementation: false,
+            platform: None,
+            project_root: project.clone(),
+            repo_root: project.clone(),
+            is_monorepo: false,
+        };
+        let provider = Provider {
+            id: "claude-code".to_string(),
+            command_prefix: "/".to_string(),
+            command: "/impeccable".to_string(),
+            skill_dir: None,
+            self_cmd: "impeccable".to_string(),
+        };
+        let mut env = Env::new();
+        env.insert("HOME".to_string(), home.clone());
+        env.insert("USERPROFILE".to_string(), home);
+
+        assert_eq!(automatic_hook_mode(&ctx, &project, &env, &provider), "stop");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod worktree_hook_tests {
+    use super::*;
+
+    #[test]
+    fn nested_linked_worktree_finds_the_checkouts_hook_manifest() {
+        let base = std::env::temp_dir().join(format!("impeccable-wt-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tmp = base.to_string_lossy().into_owned();
+        let at = |parts: &[&str]| jsp::join(&[&[tmp.as_str()], parts].concat());
+        let put = |path: String, body: &str| {
+            std::fs::create_dir_all(jsp::dirname(&path)).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        let settings = r#"{"hooks":{"PostToolUse":[{"matcher":"Edit|Write","hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/impeccable/scripts/impeccable\" hook"}]}]}}"#;
+        put(at(&["main", ".claude", "settings.json"]), settings);
+        put(at(&["main", ".git", "worktrees", "demo", "commondir"]), "../..\n");
+        put(at(&["main", ".git", "worktrees", "ext", "commondir"]), "../..\n");
+        put(at(&["main", ".git", "worktrees", "other", "commondir"]), "../..\n");
+        put(at(&["main", ".claude", "worktrees", "demo", ".git"]), &format!("gitdir: {}\n", at(&["main", ".git", "worktrees", "demo"])));
+        put(at(&["ext", ".git"]), &format!("gitdir: {}\n", at(&["main", ".git", "worktrees", "ext"])));
+        // A worktree inside an unrelated repo must not borrow that repo's manifest.
+        put(at(&["other", ".claude", "settings.json"]), settings);
+        std::fs::create_dir_all(at(&["other", ".git"])).unwrap();
+        put(at(&["other", "wt", ".git"]), &format!("gitdir: {}\n", at(&["main", ".git", "worktrees", "other"])));
+        std::fs::create_dir_all(at(&["main", ".git", "modules", "sub"])).unwrap();
+        put(at(&["main", "sub", ".git"]), "gitdir: ../.git/modules/sub\n");
+
+        let env = Env::from([
+            ("HOME".to_string(), tmp.clone()),
+            ("USERPROFILE".to_string(), tmp.clone()),
+            ("IMPECCABLE_PROVIDER_ID".to_string(), "claude-code".to_string()),
+        ]);
+        let provider = crate::provider::detect(&env, &tmp);
+        let mode = |dir: String| {
+            let ctx = load_context(&dir, &TargetOptions::default(), &env);
+            automatic_hook_mode(&ctx, &dir, &env, &provider)
+        };
+        assert_eq!(mode(at(&["main", ".claude", "worktrees", "demo"])), "stop");
+        assert_eq!(mode(at(&["ext"])), "none");
+        assert_eq!(mode(at(&["main", "sub"])), "none");
+        assert_eq!(mode(at(&["other", "wt"])), "none");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
