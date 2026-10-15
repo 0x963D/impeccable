@@ -218,6 +218,32 @@ const STATE_JS: &str = r#"(() => {
 const SEED_JS: &str =
     "(() => { document.getElementById('list').scrollTop = 137; window.scrollTo(0, 411); return [window.scrollY, document.getElementById('list').scrollTop]; })()";
 
+/// Two muted videos fed from a canvas (no codec needed): `#app-paused`,
+/// which the app paused before the scan, and `#playing`.
+const MEDIA_JS: &str = r#"(async () => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 32; canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  let n = 0;
+  setInterval(() => { ctx.fillStyle = n++ % 2 ? '#123' : '#456'; ctx.fillRect(0, 0, 32, 32); }, 50);
+  const make = (id) => {
+    const v = document.createElement('video');
+    v.id = id; v.muted = true; v.width = 32; v.height = 32;
+    v.srcObject = canvas.captureStream(20);
+    document.querySelector('main').prepend(v);
+    return v;
+  };
+  const paused = make('app-paused');
+  const playing = make('playing');
+  await paused.play(); await playing.play();
+  paused.pause();
+  playing.addEventListener('pause', () => { document.documentElement.dataset.sawPause = 'yes'; });
+  return [paused.paused, playing.paused];
+})()"#;
+
+const MEDIA_STATE_JS: &str =
+    "[document.getElementById('app-paused').paused, document.getElementById('playing').paused]";
+
 fn ids(findings: &[impeccable_core::findings::Finding]) -> Vec<&str> {
     findings.iter().map(|f| f.antipattern.as_str()).collect()
 }
@@ -230,6 +256,7 @@ fn attaches_scans_and_leaves_the_page_as_found() {
     let url = format!("{origin}/");
     let mut raw = Raw::connect(browser.ws_url());
     let target = raw.open(&url, false);
+    assert_eq!(raw.eval(&target, MEDIA_JS), json!([true, false]));
     assert_eq!(raw.eval(&target, SEED_JS), json!([411, 137]));
     let before = raw.eval(&target, STATE_JS);
     assert_eq!(before["globals"], json!([]));
@@ -264,8 +291,12 @@ fn attaches_scans_and_leaves_the_page_as_found() {
 
     let after = raw.eval(&target, STATE_JS);
     assert_eq!(after, before, "the page is as the scan found it");
-    // The pixel pass ran (it added its hide style), and its style is gone.
+    // The pixel pass ran (it added its hide style, and paused the playing
+    // video), and its style is gone. The video it paused plays again; the
+    // one the app had paused stays paused.
     assert_eq!(raw.eval(&target, "document.documentElement.dataset.sawHideStyle"), json!("yes"));
+    assert_eq!(raw.eval(&target, "document.documentElement.dataset.sawPause"), json!("yes"));
+    assert_eq!(raw.eval(&target, MEDIA_STATE_JS), json!([true, false]));
     let pages: Vec<String> = raw.pages().iter().map(|p| p["targetId"].as_str().unwrap().to_string()).collect();
     assert_eq!(pages.len(), 2, "no page opened or closed: {pages:?}");
     assert!(pages.contains(&target));
@@ -301,8 +332,8 @@ fn an_attached_scan_reports_what_a_url_scan_reports() {
 }
 
 /// A tab in the background is hidden: no frames, timers a second late. The
-/// scan still finishes, in about the time a visible one takes, and still
-/// leaves the page as found. This one also runs under the strict CSP, which
+/// scan still finishes, in about the time a visible one takes, skips the
+/// screenshot reads, and still leaves the page as found. This one also runs under the strict CSP, which
 /// the capture is not subject to.
 #[test]
 fn a_hidden_page_still_scans() {
@@ -321,8 +352,46 @@ fn a_hidden_page_still_scans() {
     let took = started.elapsed();
     assert!(took < Duration::from_secs(60), "hidden scan took {took:?}");
     assert!(ids(&scan.findings).contains(&"tiny-text"), "{:?}", ids(&scan.findings));
+    // A hidden page paints no frames, and on Linux a screenshot of it waits
+    // for one forever: the pixel pass skips it and says so.
+    assert!(!scan.findings.iter().any(|f| f.snippet.starts_with("pixel contrast ")));
+    assert_eq!(
+        scan.notes,
+        vec![format!("Capture note: {url} was hidden (minimized, or a background tab or window), so the pixel pass read nothing there. Bring it on screen, focused or not, and scan again for those contrast verdicts.")]
+    );
     assert_eq!(raw.eval(&target, STATE_JS), before);
     assert_eq!(raw.eval(&target, "document.visibilityState"), json!("hidden"));
+    browser.close();
+}
+
+/// An evaluation that outlives its protocol timeout keeps running in the
+/// page. Restoring cancels the scan's waits first, so a pass still running
+/// there stops at its next wait instead of scrolling the restored page.
+#[test]
+fn work_left_running_stops_when_the_page_is_restored() {
+    let Some(browser) = launch() else { return };
+    let origin = serve_app();
+    let url = format!("{origin}/");
+    let mut raw = Raw::connect(browser.ws_url());
+    let target = raw.open(&url, false);
+    assert_eq!(raw.eval(&target, SEED_JS), json!([411, 137]));
+
+    let mut attached = Browser::connect(browser.ws_url()).expect("connect");
+    let mut page = attached.attach_page(&target).expect("attach");
+    page.evaluate_value(attach::PREPARE_JS).expect("prepare");
+    // A sweep the client stopped waiting for: it scrolls on every wait.
+    page.evaluate_value(
+        "(() => { (async () => { for (let y = 0; y < 5000; y += 40) { window.scrollTo({ top: y, behavior: 'instant' }); await new Promise(r => setTimeout(r, 20)); } })(); return true; })()",
+    )
+    .expect("start sweep");
+    std::thread::sleep(Duration::from_millis(150));
+    assert_ne!(raw.eval(&target, "window.scrollY"), json!(411), "the sweep is running");
+    let restored = page.evaluate_value(attach::RESTORE_JS).expect("restore");
+    assert_eq!(restored["restored"], json!(true));
+    page.close();
+    attached.close();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(raw.eval(&target, "[window.scrollY, document.getElementById('list').scrollTop]"), json!([411, 137]));
     browser.close();
 }
 

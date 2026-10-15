@@ -32,6 +32,10 @@ use tungstenite::{Message, WebSocket};
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// puppeteer's per-command `protocolTimeout` (180 s).
 const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a screenshot of an attached page may take. A window that paints
+/// no frames (hidden on some systems) never answers one, and the scan of
+/// someone else's app should not sit on it for the protocol timeout.
+const ATTACHED_SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct CdpError {
@@ -766,11 +770,12 @@ pub enum EvalOutcome {
 
 impl<'a> Page<'a> {
     fn send(&mut self, method: &str, params: Value) -> CdpResult<Value> {
+        self.send_with_timeout(method, params, PROTOCOL_TIMEOUT)
+    }
+
+    fn send_with_timeout(&mut self, method: &str, params: Value, timeout: Duration) -> CdpResult<Value> {
         let sid = self.session_id.clone();
-        let out = self
-            .browser
-            .conn
-            .send(Some(&sid), method, params, PROTOCOL_TIMEOUT);
+        let out = self.browser.conn.send(Some(&sid), method, params, timeout);
         self.pump_events();
         out
     }
@@ -1688,7 +1693,8 @@ impl<'a> Page<'a> {
             (y, height)
         };
         let round = |v: f64| impeccable_core::js::math_round(v);
-        let res = self.send(
+        let timeout = if self.attached { ATTACHED_SCREENSHOT_TIMEOUT } else { PROTOCOL_TIMEOUT };
+        let res = self.send_with_timeout(
             "Page.captureScreenshot",
             json!({
                 "format": "png",
@@ -1700,6 +1706,7 @@ impl<'a> Page<'a> {
                 // show: it reads what is on screen instead.
                 "captureBeyondViewport": !self.attached,
             }),
+            timeout,
         )?;
         Ok(res
             .get("data")

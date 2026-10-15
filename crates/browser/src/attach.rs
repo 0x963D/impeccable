@@ -6,8 +6,10 @@
 //! the browser, never navigates, reloads or resizes, and changes no
 //! emulation. What the scan does change it puts back, on success and on
 //! error ([`RESTORE_JS`]): scroll positions (the window and every scroller,
-//! open shadow roots included), media it paused, and the style element and
-//! marker attributes the pixel pass adds. Consent and overlay hiding stay off:
+//! open shadow roots included), the videos the pixel pass paused, and the
+//! style element and marker attributes that pass adds. Restoring first
+//! cancels the scan's waits, so page-side work an evaluation left running
+//! (one that outlived its protocol timeout) cannot move the page again. Consent and overlay hiding stay off:
 //! the person seeded the state they want reviewed, and hiding part of it
 //! would change what they see.
 //!
@@ -249,6 +251,9 @@ pub fn browser_ws_url(endpoint: &CdpEndpoint) -> Result<String, String> {
 /// - `requestAnimationFrame` fires on the next frame or after 100ms,
 ///   whichever comes first, so a frame wait never hangs on a window that
 ///   paints no frames.
+/// - Once [`RESTORE_JS`] sets `__impeccableAttachCancelled`, neither calls
+///   anything back, so an async pass still running page-side stops at its
+///   next wait instead of scrolling the restored page.
 ///
 /// The page's own globals are untouched: these are the isolated world's.
 pub const PREPARE_JS: &str = r#"(() => {
@@ -282,7 +287,7 @@ pub const PREPARE_JS: &str = r#"(() => {
     g.setTimeout = (cb, ms, ...args) => {
       const id = ++next;
       const wait = Math.max(0, Number(ms) || 0);
-      const run = () => { if (typeof cb === 'function') cb(...args); };
+      const run = () => { if (!g.__impeccableAttachCancelled && typeof cb === 'function') cb(...args); };
       if (document.visibilityState === 'hidden') {
         live.set(id, null);
         spin(id, wait, run);
@@ -298,7 +303,7 @@ pub const PREPARE_JS: &str = r#"(() => {
     };
     g.requestAnimationFrame = (cb) => {
       let done = false;
-      const fire = () => { if (!done) { done = true; cb(performance.now()); } };
+      const fire = () => { if (!done) { done = true; if (!g.__impeccableAttachCancelled) cb(performance.now()); } };
       nativeRaf(fire);
       g.setTimeout(fire, 100);
       return 0;
@@ -313,24 +318,26 @@ pub const PREPARE_JS: &str = r#"(() => {
     }
   };
   walk(document);
-  const media = Array.from(document.querySelectorAll('video, audio')).filter((m) => !m.paused);
+  g.__impeccableAttachCancelled = false;
   g.__impeccableAttach = {
     x: window.scrollX,
     y: window.scrollY,
     scrolled,
-    media,
     hideStyle: !!document.getElementById('impeccable-visual-contrast-hide-style'),
   };
-  return { hidden: document.visibilityState === 'hidden', scrollers: scrolled.length, playing: media.length };
+  return { hidden: document.visibilityState === 'hidden', scrollers: scrolled.length };
 })()"#;
 
-/// Put back what [`PREPARE_JS`] recorded: every scroller at its old position
-/// (a scroller the scan moved off 0 back to 0), the window last, media the
-/// scan paused playing again, and the pixel pass's style element and marker
-/// attributes gone. Then the scan's own globals go, so the isolated world
-/// holds no references to the page's elements.
+/// Put back what [`PREPARE_JS`] recorded: first cancel the scan's waits,
+/// then every scroller at its old position (a scroller the scan moved off 0
+/// back to 0), the window last, the videos the pixel pass paused
+/// (`__impeccablePausedMedia`) playing again unless they have ended, and the
+/// pixel pass's style element and marker attributes gone. Then the scan's
+/// own globals go, so the isolated world holds no references to the page's
+/// elements.
 pub const RESTORE_JS: &str = r#"(() => {
   const g = globalThis;
+  g.__impeccableAttachCancelled = true;
   const saved = g.__impeccableAttach;
   const out = { restored: false };
   if (saved) {
@@ -350,8 +357,8 @@ pub const RESTORE_JS: &str = r#"(() => {
     };
     walk(document);
     window.scrollTo({ left: saved.x, top: saved.y, behavior: 'instant' });
-    for (const m of saved.media) {
-      if (!m.paused) continue;
+    for (const m of g.__impeccablePausedMedia || []) {
+      if (!m.paused || m.ended || !m.isConnected) continue;
       try { const p = m.play(); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch (e) {}
     }
     if (!saved.hideStyle) {
@@ -366,7 +373,7 @@ pub const RESTORE_JS: &str = r#"(() => {
     el.removeAttribute('data-impeccable-visual-contrast-target');
     el.removeAttribute('data-impeccable-bgclip-text');
   }
-  for (const key of ['__impeccableSnapshot', '__impCap', '__impIO', '__impeccableContrastRestore', '__impeccableVisualScrollSaved', '__impeccableAttach']) {
+  for (const key of ['__impeccableSnapshot', '__impCap', '__impIO', '__impeccableContrastRestore', '__impeccableVisualScrollSaved', '__impeccablePausedMedia', '__impeccableAttach']) {
     try { delete g[key]; } catch (e) {}
   }
   return out;
@@ -413,7 +420,7 @@ fn scan_target(browser: &mut Browser, target: &PageTarget, options: &ScanOptions
             Ok(_) => "the recorded state was gone".to_string(),
         };
         scan.notes.push(format!(
-            "Could not put {url} back as it was after the scan ({why}); check its scroll position and any media it was playing."
+            "Could not put {url} back as it was after the scan ({why}); check its scroll position and any video it was playing."
         ));
     }
     Ok(scan)

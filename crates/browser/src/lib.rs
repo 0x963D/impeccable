@@ -1392,8 +1392,27 @@ fn scan_loaded(
         )
     })
     .map_err(cdp_err)?;
-    let (mut visual, superseded) =
-        run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
+    // A hidden window paints no frames, and a screenshot of it can wait for
+    // one that never comes: an attached page skips the pixel reads while it
+    // is hidden, and they stop if one stalls. What they would have read
+    // keeps the element pass's verdict, as advisory.
+    let pixels_off = page.is_attached()
+        && page
+            .evaluate_value("document.visibilityState === 'hidden'")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let (mut visual, superseded, stalled) =
+        run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url, pixels_off)?;
+    if pixels_off {
+        notes.push(format!(
+            "Capture note: {url} was hidden (minimized, or a background tab or window), so the pixel pass read nothing there. Bring it on screen, focused or not, and scan again for those contrast verdicts."
+        ));
+    } else if let Some(why) = stalled {
+        notes.push(format!(
+            "Capture note: the pixel pass on {url} stopped when a screenshot stalled ({why}). Bring the window on screen and scan again for the contrast verdicts it did not read."
+        ));
+    }
     settle_handed_over(&mut results, &superseded, |r| {
         repeated_match(&base, r.selector.as_deref()?, r.scan_el?)
     });
@@ -2024,6 +2043,11 @@ fn analysis_findings(
 /// target)`: the JS post-processing of the analytic/canvas analyses
 /// (`analyzeVisualContrast`, computed natively in [`snapshot_engine`]) plus the
 /// screenshot pixel fallback for candidates the analyses left unresolved.
+///
+/// `skip_pixels` leaves out the screenshot reads (an attached page that is
+/// hidden). On an attached page a read that fails ends the reads instead of
+/// the scan, and the third value says why.
+#[allow(clippy::too_many_arguments)]
 fn run_visual_contrast_fallback(
     page: &mut Page<'_>,
     browser_analyses: &[Value],
@@ -2031,7 +2055,8 @@ fn run_visual_contrast_fallback(
     viewport: Viewport,
     profile: Option<&DetectorProfile>,
     target: &str,
-) -> Result<(Vec<RawResult>, Vec<CandidateKey>), EngineError> {
+    skip_pixels: bool,
+) -> Result<(Vec<RawResult>, Vec<CandidateKey>, Option<String>), EngineError> {
     // Text the element pass hands over rather than scores (see
     // `visual::routed_reason`): its element verdict does not keep the pixels
     // from reading it, and the pixels' verdict replaces that one.
@@ -2077,6 +2102,7 @@ fn run_visual_contrast_fallback(
         .collect();
     let filtered: Vec<&Value> = candidates
         .iter()
+        .filter(|_| !skip_pixels)
         .filter(|c| {
             let sel = c.get("selector").and_then(Value::as_str);
             (!existing_low_contrast
@@ -2096,13 +2122,18 @@ fn run_visual_contrast_fallback(
         // say nothing than measure that. Playing media is the one moving thing
         // a scan can hold still without changing what the page shows: a paused
         // video still paints the frame the visitor is looking at.
-        let _ = page.evaluate(
-            "document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch (e) {} })",
-        );
+        // An attached app's page gets back the videos this paused, and only
+        // those ([`attach::RESTORE_JS`]).
+        let _ = page.evaluate(if page.is_attached() {
+            "(() => { const paused = globalThis.__impeccablePausedMedia || (globalThis.__impeccablePausedMedia = []); document.querySelectorAll('video').forEach(v => { try { if (!v.paused) { v.pause(); paused.push(v); } } catch (e) {} }); })()"
+        } else {
+            "document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch (e) {} })"
+        });
     }
     let mut routed_spent = std::time::Duration::ZERO;
     let mut routed_misses = 0usize;
     let mut pixel_pairs: Vec<String> = Vec::new();
+    let mut stalled: Option<String> = None;
     for candidate in filtered {
         let sel = candidate.get("selector").and_then(Value::as_str);
         // A read the first budget's rules would not have made.
@@ -2115,7 +2146,7 @@ fn run_visual_contrast_fallback(
         }
         let started = std::time::Instant::now();
         let mut measured = false;
-        let result = step_findings(profile, "visual-contrast", "pixel-diff", target, || {
+        let read = step_findings(profile, "visual-contrast", "pixel-diff", target, || {
             let m = screenshot_contrast::measure_visual_contrast_candidate(
                 page,
                 candidate,
@@ -2135,7 +2166,15 @@ fn run_visual_contrast_fallback(
                     })
                     .unwrap_or_default(),
             )
-        })?;
+        });
+        let result = match read {
+            Ok(r) => r,
+            Err(e) if page.is_attached() => {
+                stalled = Some(e.message);
+                break;
+            }
+            Err(e) => return Err(e),
+        };
         if extra {
             let spent = started.elapsed();
             routed_spent += spent;
@@ -2161,7 +2200,7 @@ fn run_visual_contrast_fallback(
                 }),
         );
     }
-    Ok((findings, superseded))
+    Ok((findings, superseded, stalled))
 }
 
 /// The colour pair a pixel-pass finding reports: the candidate's ink, its
