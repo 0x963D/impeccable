@@ -206,8 +206,41 @@ fn data_source(url: &str, key: &str) -> Option<ImageSource> {
     })
 }
 
+/// A file url's path with its `%XX` escapes decoded, the way the browser
+/// requests `url(light%20%28copy%29.png)`; the query and fragment are cut
+/// first, so an escaped `#` or `?` stays part of the name. An escape that
+/// is not two hex digits is left as written.
+fn percent_decoded_path(url: &str) -> Cow<'_, str> {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    if !path.contains('%') {
+        return Cow::Borrowed(path);
+    }
+    let bytes = path.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = (bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit())
+        .then(|| u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?, 16).ok())
+        .flatten();
+        match hex {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
 fn file_source(base: &str, url: &str) -> Option<ImageSource> {
-    let path = resolve_linked_css_path(base, url);
+    let path = resolve_linked_css_path(base, &percent_decoded_path(url));
     let meta = std::fs::metadata(&path).ok()?;
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
         return None;
@@ -273,8 +306,7 @@ pub fn ground_label(url: &str) -> String {
             format!("data:{mime}")
         };
     }
-    let stripped = url.split(['?', '#']).next().unwrap_or("");
-    jsp::basename(stripped)
+    jsp::basename(&percent_decoded_path(url))
 }
 
 fn source_bytes(source: &ImageSource, url: &str) -> Option<Vec<u8>> {

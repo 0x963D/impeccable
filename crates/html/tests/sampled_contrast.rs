@@ -536,3 +536,248 @@ fn the_page_dir_is_the_base_for_everything_inline() {
     let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
     assert!(found.is_empty(), "{found:?}");
 }
+
+/// The measured ratio a sampled snippet reports.
+fn ratio_of(snippet: &str) -> f64 {
+    snippet
+        .trim_start_matches("sampled (coarse) ")
+        .split(":1")
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn a_spaced_image_does_not_fill_its_axis() {
+    let site = Site::new("space");
+    // `space` leaves gaps and paints once when two tiles do not fit, so a
+    // light image over an opaque dark color does not replace the color as
+    // the ground. Tiled with `repeat` or `round`, it does.
+    for (repeat, sampled) in [
+        ("space", false),
+        ("space repeat", false),
+        ("repeat", true),
+        ("round", true),
+    ] {
+        let css = format!(
+            ".hero {{ background: #17150f url(light.png) {repeat}; }} p {{ color: #fdfdfd; }}"
+        );
+        let found = site.contrast(&css, "<div class=hero><p>White copy</p></div>");
+        if sampled {
+            assert!(sampled_on("light.png", &found), "{repeat}: {found:?}");
+        } else {
+            assert!(found.is_empty(), "{repeat}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn a_shifted_image_is_not_known_to_cover_a_color() {
+    let site = Site::new("position");
+    // A `background-position` that is a keyword, a percentage, or zero
+    // keeps the image in its box. A length can push it out and expose the
+    // color under it, so the color stays the ground; tiling fills the box
+    // wherever the image starts.
+    for (layer, sampled) in [
+        ("center / 100% 100% no-repeat", true),
+        ("50% 50% / 100% 100% no-repeat", true),
+        ("right bottom / 100% 100% no-repeat", true),
+        ("0 0 / 100% 100% no-repeat", true),
+        ("0 200px / 100% 100% no-repeat", false),
+        ("center 4rem / cover no-repeat", false),
+        ("calc(50% - 10px) 0 / cover no-repeat", false),
+        ("0 200px / 100% 100% repeat", true),
+    ] {
+        let css = format!(
+            ".hero {{ background: #17150f url(light.png) {layer}; }} p {{ color: #fdfdfd; }}"
+        );
+        let found = site.contrast(&css, "<div class=hero><p>White copy</p></div>");
+        if sampled {
+            assert!(sampled_on("light.png", &found), "{layer}: {found:?}");
+        } else {
+            assert!(found.is_empty(), "{layer}: {found:?}");
+        }
+    }
+    // The longhand overrides the shorthand's position.
+    let css = ".hero { background: #17150f url(light.png) center / 100% 100% no-repeat; background-position: 0 200px; } p { color: #fdfdfd; }";
+    let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_repeat_held_in_a_custom_property_is_read() {
+    let site = Site::new("var-repeat");
+    // The icon over an opaque dark color: tiled, its pixels are the ground;
+    // `no-repeat` from a custom property leaves the color as the ground.
+    for (value, sampled) in [("no-repeat", false), ("repeat", true)] {
+        let css = format!(
+            ":root {{ --tile: {value}; }} .hero {{ background: #17150f url(icon.png) var(--tile); }} p {{ color: #fdfdfd; }}"
+        );
+        let found = site.contrast(&css, "<div class=hero><p>White copy</p></div>");
+        if sampled {
+            assert!(sampled_on("icon.png", &found), "{value}: {found:?}");
+        } else {
+            assert!(found.is_empty(), "{value}: {found:?}");
+        }
+    }
+    // A custom property holding a color is not the repeat: the shorthand
+    // names none and the icon tiles.
+    let css = ":root { --brand: #17150f; } .hero { background: url(icon.png) var(--brand); } p { color: #fdfdfd; }";
+    let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
+    assert!(sampled_on("icon.png", &found), "{found:?}");
+    // A repeat keyword beside the custom property wins.
+    let css = ":root { --brand: #17150f; } .hero { background: url(icon.png) var(--brand) no-repeat; } p { color: #fdfdfd; }";
+    let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn faded_text_is_measured_as_seen() {
+    let site = Site::new("opacity");
+    let hero = ".hero { background: url(dark.png); }";
+    for (fade, body, sampled) in [
+        // White reads on the dark image; at a fifth of its opacity it does
+        // not, whether the fade is on the text or on a box between the text
+        // and the image.
+        (
+            "p { color: #fdfdfd; }",
+            "<div class=hero><p>Copy</p></div>",
+            false,
+        ),
+        (
+            "p { color: #fdfdfd; opacity: 0.2; }",
+            "<div class=hero><p>Copy</p></div>",
+            true,
+        ),
+        (
+            "p { color: #fdfdfd; } .faded { opacity: 0.2; }",
+            "<div class=hero><div class=faded><p>Copy</p></div></div>",
+            true,
+        ),
+        // The image element's own opacity fades image and text alike.
+        (
+            ".hero { opacity: 0.2; } p { color: #fdfdfd; }",
+            "<div class=hero><p>Copy</p></div>",
+            false,
+        ),
+        // Faint enough, the text is hidden on purpose and not measured.
+        (
+            "p { color: #fdfdfd; opacity: 0.05; }",
+            "<div class=hero><p>Copy</p></div>",
+            false,
+        ),
+    ] {
+        let found = site.contrast(&format!("{hero} {fade}"), body);
+        if sampled {
+            assert!(sampled_on("dark.png", &found), "{fade}: {found:?}");
+        } else {
+            assert!(found.is_empty(), "{fade}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn a_fill_inside_a_faded_box_fades_with_it() {
+    let site = Site::new("fold");
+    // A dark translucent card at a third of its opacity over the light
+    // image: the browser composites the card and its text together, so the
+    // white copy reads against a barely tinted ground, not against the
+    // card's own dark. Over the card's dark it would clear 10:1, and a
+    // blend of faded text over the unfaded card reads about 2.4:1.
+    let css = ".hero { background: url(light.png); } .card { background: rgba(0, 0, 0, 0.8); opacity: 0.3; } p { color: #fff; }";
+    let found = site.contrast(
+        css,
+        "<div class=hero><div class=card><p>Copy</p></div></div>",
+    );
+    assert!(sampled_on("light.png", &found), "{found:?}");
+    assert!(ratio_of(&found[0]) < 2.1, "{found:?}");
+    // The same card at full opacity is a ground the text reads on.
+    let css = ".hero { background: url(light.png); } .card { background: rgba(0, 0, 0, 0.8); } p { color: #fff; }";
+    let found = site.contrast(
+        css,
+        "<div class=hero><div class=card><p>Copy</p></div></div>",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_stretched_pseudo_that_paints_stops_the_walk() {
+    let site = Site::new("overlay");
+    let page = ".hero { position: relative; background: url(light.png); } p { color: #fdfdfd; }";
+    for (pseudo, sampled) in [
+        // A scrim, a gradient, or a picture stretched over the image is not
+        // in the samples: the walk gives up.
+        (
+            ".hero::before { content: ''; position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); }",
+            false,
+        ),
+        (
+            ".hero::after { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; background: linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.2)); }",
+            false,
+        ),
+        (
+            ".hero::before { content: ''; position: absolute; width: 100%; height: 100%; background: url(dark.png); }",
+            false,
+        ),
+        // A value the engine cannot read is paint it cannot see through.
+        (
+            ".hero::before { content: ''; position: absolute; inset: 0; background: var(--scrim); }",
+            false,
+        ),
+        // Too faint to count, painting nothing, not stretched over the box,
+        // or never rendered for want of `content`: the image is still the
+        // ground.
+        (
+            ".hero::before { content: ''; position: absolute; inset: 0; background: rgba(0, 0, 0, 0.01); }",
+            true,
+        ),
+        (
+            ".hero::before { content: ''; position: absolute; inset: 0; background: none; }",
+            true,
+        ),
+        (
+            ".hero::before { content: ''; position: absolute; inset: 0; }",
+            true,
+        ),
+        (
+            ".hero::before { content: ''; position: absolute; top: 0; left: 0; width: 50%; height: 100%; background: rgba(0, 0, 0, 0.6); }",
+            true,
+        ),
+        (
+            ".hero::before { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); }",
+            true,
+        ),
+    ] {
+        let found = site.contrast(
+            &format!("{page} {pseudo}"),
+            "<div class=hero><p>White copy</p></div>",
+        );
+        if sampled {
+            assert!(sampled_on("light.png", &found), "{pseudo}: {found:?}");
+        } else {
+            assert!(found.is_empty(), "{pseudo}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn an_escaped_path_resolves_to_its_file() {
+    let site = Site::new("escaped");
+    site.png("light (copy).png", 320, 200, LIGHT);
+    site.png("100%.png", 320, 200, LIGHT);
+    for (url, file) in [
+        ("light%20%28copy%29.png", "light (copy).png"),
+        ("\"light%20%28copy%29.png?v=2\"", "light (copy).png"),
+        ("100%25.png", "100%.png"),
+    ] {
+        let css = format!(".hero {{ background: url({url}); }} p {{ color: #fdfdfd; }}");
+        let found = site.contrast(&css, "<div class=hero><p>White copy</p></div>");
+        assert!(sampled_on(file, &found), "{url}: {found:?}");
+    }
+    // An escape that is not two hex digits is kept as written: there is no
+    // such file, so the skip stays.
+    let css = ".hero { background: url(light%2.png); } p { color: #fdfdfd; }";
+    let found = site.contrast(css, "<div class=hero><p>White copy</p></div>");
+    assert!(found.is_empty(), "{found:?}");
+}

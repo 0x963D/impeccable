@@ -854,9 +854,11 @@ pub enum LevelPaint {
 pub struct ImageLayer {
     /// The `url()` call inside the element's `backgroundImage` value.
     pub call: UrlCall,
-    /// The layer's own `background-repeat` and `background-size` entries.
+    /// The layer's own `background-repeat`, `background-size`, and
+    /// `background-position` entries.
     pub repeat: String,
     pub size: String,
+    pub position: String,
     /// Uniform washes listed above the image in the same declaration.
     pub washes: Vec<Rgba>,
     /// The element's own background color, painted beneath the image.
@@ -891,10 +893,14 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
     if paints_no_box(style) {
         return LevelPaint::Through(Vec::new());
     }
-    // A `::before` or `::after` stretched over the element with a fill of
-    // its own covers whatever the element paints; the analytic path owns
-    // that surface.
-    if cur.doc.get_pseudo_surface(cur.id()).is_some() {
+    // A `::before` or `::after` stretched over the element paints over
+    // whatever the element paints: an opaque fill the analytic path owns, a
+    // translucent or gradient overlay, or a picture. None of them is in the
+    // samples, so the walk gives up here.
+    if cur.doc.get_pseudo_surface(cur.id()).is_some()
+        || cur.doc.has_pseudo_overlay(cur.id())
+        || cur.doc.has_pseudo_picture(cur.id())
+    {
         return LevelPaint::Stop;
     }
     // A blend changes what every pixel looks like in a way the sampler
@@ -962,6 +968,7 @@ pub fn analyze_level(cur: &StaticElement<'_>) -> LevelPaint {
                 call,
                 repeat: layer_entry(sv(style, "backgroundRepeat"), index),
                 size: layer_entry(sv(style, "backgroundSize"), index),
+                position: layer_entry(sv(style, "backgroundPosition"), index),
                 washes,
                 color,
                 layers_beneath,
@@ -1000,8 +1007,11 @@ pub struct ImageGround {
     /// The element that paints the image.
     pub node: NodeId,
     pub layer: ImageLayer,
-    /// Translucent paint between the text and the image, top to bottom.
-    pub overlays: Vec<Rgba>,
+    /// Translucent paint between the text and the image, top to bottom,
+    /// each with the element that paints it; the image element's own washes
+    /// carry its id. The adapter folds the opacity of the boxes between the
+    /// text and the image around these.
+    pub overlays: Vec<(NodeId, Rgba)>,
     /// What a translucent pixel composites over, when the walk can say.
     pub under: Option<Rgba>,
     /// The element also declares an opaque color, so the image replaces it
@@ -1033,13 +1043,13 @@ fn parent_ground(cur: &StaticElement<'_>, levels: &LevelCache) -> Option<Rgba> {
 /// no image is reached.
 pub fn find_image_ground(el: &StaticElement<'_>, levels: &LevelCache) -> Option<ImageGround> {
     let mut current = Some(*el);
-    let mut overlays: Vec<Rgba> = Vec::new();
+    let mut overlays: Vec<(NodeId, Rgba)> = Vec::new();
     while let Some(cur) = current {
         match &*levels.get(&cur) {
             LevelPaint::Stop => return None,
-            LevelPaint::Through(paint) => overlays.extend(paint.iter().copied()),
+            LevelPaint::Through(paint) => overlays.extend(paint.iter().map(|c| (cur.id(), *c))),
             LevelPaint::Image(layer) => {
-                overlays.extend(layer.washes.iter().copied());
+                overlays.extend(layer.washes.iter().map(|c| (cur.id(), *c)));
                 let over_opaque_color = layer.color.as_ref().is_some_and(|c| a_ge(c, 0.99));
                 // A layer beneath the image is unknown paint. Otherwise the
                 // element's own color, over its parent's ground when it is

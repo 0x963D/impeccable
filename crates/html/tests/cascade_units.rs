@@ -124,6 +124,14 @@ fn apply_static_declaration_matches_node() {
             s("repeat"),
         ),
         (s("backgroundSize"), false, [0, 1, 0], 6, false, s("auto")),
+        (
+            s("backgroundPosition"),
+            false,
+            [0, 1, 0],
+            6,
+            false,
+            s("0% 0%"),
+        ),
         (s("--brand"), false, [0, 1, 0], 7, false, s("#fff")),
         (s("fontStyle"), false, [0, 1, 0], 8, false, s("italic")),
         (s("fontWeight"), false, [0, 1, 0], 8, false, s("700")),
@@ -254,7 +262,8 @@ fn background_longhands_ride_beside_the_expansion() {
         ),
         own(&[
             ("backgroundRepeat", "no-repeat, repeat"),
-            ("backgroundSize", "cover, auto")
+            ("backgroundSize", "cover, auto"),
+            ("backgroundPosition", "center, 0% 0%")
         ])
     );
     // The css-tree generator glues the first keyword to the call.
@@ -262,7 +271,8 @@ fn background_longhands_ride_beside_the_expansion() {
         pairs("background", "url(a.png)center/cover no-repeat"),
         own(&[
             ("backgroundRepeat", "no-repeat"),
-            ("backgroundSize", "cover")
+            ("backgroundSize", "cover"),
+            ("backgroundPosition", "center")
         ])
     );
     // Tokens may come before the image, and a paren in an escaped or quoted
@@ -271,12 +281,17 @@ fn background_longhands_ride_beside_the_expansion() {
         pairs("background", "center / 64px no-repeat url(a\\).png)"),
         own(&[
             ("backgroundRepeat", "no-repeat"),
-            ("backgroundSize", "64px")
+            ("backgroundSize", "64px"),
+            ("backgroundPosition", "center")
         ])
     );
     assert_eq!(
         pairs("background", "url(\"a)b.png\") repeat-x"),
-        own(&[("backgroundRepeat", "repeat-x"), ("backgroundSize", "auto")])
+        own(&[
+            ("backgroundRepeat", "repeat-x"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%")
+        ])
     );
     // A size given as a function is kept for the compute loop to resolve;
     // it used to collapse to `auto`. A slash inside calc() is not the
@@ -288,14 +303,16 @@ fn background_longhands_ride_beside_the_expansion() {
         ),
         own(&[
             ("backgroundRepeat", "no-repeat"),
-            ("backgroundSize", "var(--Seal)")
+            ("backgroundSize", "var(--Seal)"),
+            ("backgroundPosition", "right top")
         ])
     );
     assert_eq!(
         pairs("background", "url(a.png) 0 0 / calc(100% / 3) AUTO"),
         own(&[
             ("backgroundRepeat", "repeat"),
-            ("backgroundSize", "calc(100% / 3) auto")
+            ("backgroundSize", "calc(100% / 3) auto"),
+            ("backgroundPosition", "0 0")
         ])
     );
     assert_eq!(
@@ -309,6 +326,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "repeat"),
             ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
             ("backgroundImage", "none")
         ])
     );
@@ -317,6 +335,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "repeat"),
             ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
             ("backgroundImage", "none")
         ])
     );
@@ -327,6 +346,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "repeat"),
             ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
             ("backgroundImage", "#111 paint(dots)")
         ])
     );
@@ -335,6 +355,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "repeat"),
             ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
             ("backgroundImage", "paint(var(--pattern))")
         ])
     );
@@ -343,6 +364,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "repeat"),
             ("backgroundSize", "cover"),
+            ("backgroundPosition", "center"),
             ("backgroundImage", "image-set(\"a.png\" 1x) center / cover")
         ])
     );
@@ -354,6 +376,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "repeat"),
             ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
             ("backgroundColor", "#17150f")
         ])
     );
@@ -365,6 +388,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "repeat, no-repeat"),
             ("backgroundSize", "auto, auto"),
+            ("backgroundPosition", "0% 0%, 0% 0%"),
             ("backgroundColor", "rgba(0, 0, 0, 0.5)")
         ])
     );
@@ -373,6 +397,7 @@ fn background_longhands_ride_beside_the_expansion() {
         own(&[
             ("backgroundRepeat", "no-repeat, repeat"),
             ("backgroundSize", "auto, auto"),
+            ("backgroundPosition", "0% 0%, 0% 0%"),
             ("backgroundColor", "#17150F")
         ])
     );
@@ -380,22 +405,32 @@ fn background_longhands_ride_beside_the_expansion() {
         pairs("background", "url(a.png), element(#abc)"),
         own(&[
             ("backgroundRepeat", "repeat, repeat"),
-            ("backgroundSize", "auto, auto")
+            ("backgroundSize", "auto, auto"),
+            ("backgroundPosition", "0% 0%, 0% 0%")
         ])
     );
     assert_eq!(
         pairs("background", "#111 url(a.png)"),
-        own(&[("backgroundRepeat", "repeat"), ("backgroundSize", "auto")])
+        own(&[
+            ("backgroundRepeat", "repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%")
+        ])
     );
     assert_eq!(
         pairs("background", "linear-gradient(#fff, #000)"),
-        own(&[("backgroundRepeat", "repeat"), ("backgroundSize", "auto")])
+        own(&[
+            ("backgroundRepeat", "repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%")
+        ])
     );
     assert_eq!(
         pairs("background", "Inherit"),
         own(&[
             ("backgroundRepeat", "inherit"),
-            ("backgroundSize", "inherit")
+            ("backgroundSize", "inherit"),
+            ("backgroundPosition", "inherit")
         ])
     );
     // `initial`, `unset`, and `revert` are the longhands' initial values;
@@ -410,11 +445,99 @@ fn background_longhands_ride_beside_the_expansion() {
     );
     assert_eq!(
         pairs("background", "revert"),
-        own(&[("backgroundRepeat", "repeat"), ("backgroundSize", "auto")])
+        own(&[
+            ("backgroundRepeat", "repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%")
+        ])
     );
     assert_eq!(
         pairs("background-blend-mode", "multiply, screen"),
         own(&[("backgroundBlendMode", "multiply, screen")])
+    );
+    // The css-tree generator glues tokens the tokenizer can tell apart: a
+    // value that round-tripped through the parser carries no space after a
+    // `)` or a `%`, or before a `#`. Each glued component is still read.
+    assert_eq!(
+        pairs(
+            "background",
+            "#17150f url(light.png)center/100% 100%no-repeat"
+        ),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "100% 100%"),
+            ("backgroundPosition", "center")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(icon.png)no-repeat#17150f"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%"),
+            ("backgroundColor", "#17150f")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(icon.png)var(--tile)"),
+        own(&[
+            ("backgroundRepeat", "var(--tile)"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(a.png)0 200px/100%100%no-repeat"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "100% 100%"),
+            ("backgroundPosition", "0 200px")
+        ])
+    );
+    // A bare `var()` in a shorthand may hold the repeat: it is stored as the
+    // repeat when no keyword names one and the compute loop resolves it. It
+    // is never read as a position, and a repeat keyword beside it wins.
+    assert_eq!(
+        pairs("background", "url(icon.png) var(--repeat)"),
+        own(&[
+            ("backgroundRepeat", "var(--repeat)"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "0% 0%")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "var(--brand) url(a.png) center no-repeat"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "center")
+        ])
+    );
+    // The position keeps its lengths and functions for the sampler to
+    // judge; the longhand resets like the others.
+    assert_eq!(
+        pairs("background", "url(a.png) 0 200px / 100% 100% no-repeat"),
+        own(&[
+            ("backgroundRepeat", "no-repeat"),
+            ("backgroundSize", "100% 100%"),
+            ("backgroundPosition", "0 200px")
+        ])
+    );
+    assert_eq!(
+        pairs("background", "url(a.png) calc(50% - 10px) bottom 1rem"),
+        own(&[
+            ("backgroundRepeat", "repeat"),
+            ("backgroundSize", "auto"),
+            ("backgroundPosition", "calc(50% - 10px) bottom 1rem")
+        ])
+    );
+    assert_eq!(
+        pairs("background-position", "Center"),
+        own(&[("backgroundPosition", "Center")])
+    );
+    assert_eq!(
+        pairs("background-position", "initial"),
+        own(&[("backgroundPosition", "0% 0%")])
     );
     assert!(pairs("background", "var(--surface)").is_empty());
     assert!(pairs("background-color", "red").is_empty());

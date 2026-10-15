@@ -9,7 +9,7 @@ use crate::background::{
     a_ge, a_gt, find_image_ground, read_cascade_background_color, read_own_background_color,
     resolve_background,
     resolve_border_radius_px, resolve_side_accent_corners, resolve_text_gradient_stops,
-    resolve_text_surface, sv, sv_opt, CustomPropMap, TextSurface,
+    resolve_text_surface, sv, sv_opt, CustomPropMap, ImageGround, TextSurface,
 };
 use crate::cascade::StyleValues;
 use crate::layer::picture_under_text;
@@ -19,6 +19,7 @@ use crate::quality::{
     collapse_ws, is_in_non_rendered_markup, is_visually_hidden, pf0, resolve_font_size_px,
 };
 use impeccable_core::checks::css_scan::css_length_to_px;
+use impeccable_core::checks::gradient_geometry::fold_opacity;
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
     data_svg_intrinsic_size, gpt_border_shadow_halo_blur_px, gpt_border_shadow_lengths_close,
@@ -1251,10 +1252,32 @@ fn sampled_image_contrast(
     if replaced_by_its_image(el) {
         return None;
     }
+    // The `opacity` of the boxes between the text and the image fades the
+    // text, and any fill inside a faded box with it, over the image; the
+    // image is not faded (the image element's own opacity fades both alike
+    // and is not applied). Faint enough, the text is hidden and not
+    // measured at all.
+    let layers = fade_layers(el, &ground);
+    let fade: f64 = layers.iter().map(|(_, o)| *o).product();
+    let text = opts.text_color?;
+    let faded = fade < 0.999;
+    if faded {
+        let seen = ColorOpts {
+            text_color: Some(Rgba {
+                a: Some(text.alpha_or_one() * fade),
+                ..text
+            }),
+            ..opts.clone()
+        };
+        if !sampled_contrast::applies(&seen) {
+            return None;
+        }
+    }
     let source = images.source(el.doc, ground.node, &ground.layer)?;
     let extents = sampled_contrast::layer_extents(
         &ground.layer.repeat,
         &ground.layer.size,
+        &ground.layer.position,
         source.width as f64,
         source.height as f64,
         ground.layer.font_size,
@@ -1272,14 +1295,65 @@ fn sampled_image_contrast(
     }
     let raster = images.raster(el.doc, ground.node, &ground.layer, &source)?;
     let points = sampled_contrast::grid_points(raster.width as usize, raster.height as usize);
+    let label = ground_label(&layer_url(el.doc, ground.node, &ground.layer));
+    if faded {
+        // The fills inside the fade are folded with the text; the image
+        // element's own washes lie beneath every fade and stay in the base.
+        let washes: Vec<Rgba> = ground
+            .overlays
+            .iter()
+            .filter(|(node, _)| *node == ground.node)
+            .map(|(_, c)| *c)
+            .collect();
+        let pairs: Vec<(Rgba, Rgba)> = points
+            .iter()
+            .filter_map(|&(x, y)| {
+                let base =
+                    sampled_contrast::composite_sample(raster.pixel(x, y), ground.under, &washes)?;
+                Some(fold_opacity(&text, &layers, &base))
+            })
+            .collect();
+        return sampled_contrast::sampled_contrast_pairs(opts, &label, &pairs, points.len());
+    }
+    let overlays: Vec<Rgba> = ground.overlays.iter().map(|(_, c)| *c).collect();
     let samples: Vec<Rgba> = points
         .iter()
         .filter_map(|&(x, y)| {
-            sampled_contrast::composite_sample(raster.pixel(x, y), ground.under, &ground.overlays)
+            sampled_contrast::composite_sample(raster.pixel(x, y), ground.under, &overlays)
         })
         .collect();
-    let label = ground_label(&layer_url(el.doc, ground.node, &ground.layer));
     sampled_contrast::sampled_contrast(opts, &label, &samples, points.len())
+}
+
+/// The boxes from the text element up to, but not including, the element
+/// that paints its image, in the shape `fold_opacity` takes: each box as
+/// the translucent fills it paints (top to bottom, from the walk's
+/// overlays) and its declared `opacity`, which scales the box's fills and
+/// text together, so every fill but the last of a box carries 1.
+fn fade_layers(el: &StaticElement<'_>, ground: &ImageGround) -> Vec<(Option<Rgba>, f64)> {
+    let mut layers: Vec<(Option<Rgba>, f64)> = Vec::new();
+    let mut cur = Some(*el);
+    while let Some(c) = cur {
+        if c.id() == ground.node {
+            break;
+        }
+        let fills: Vec<Rgba> = ground
+            .overlays
+            .iter()
+            .filter(|(node, _)| *node == c.id())
+            .map(|(_, fill)| *fill)
+            .collect();
+        let opacity = opacity_of(c.style());
+        match fills.split_last() {
+            None => layers.push((None, opacity)),
+            Some((last, rest)) => {
+                layers.extend(rest.iter().map(|fill| (Some(*fill), 1.0)));
+                layers.push((Some(*last), opacity));
+            }
+        }
+        cur = c.parent_element();
+    }
+    layers
 }
 
 /// Text hidden on purpose over the image that stands in for it: a

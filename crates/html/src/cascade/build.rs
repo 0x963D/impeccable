@@ -353,6 +353,26 @@ fn mark_pseudo_rule(
                 .find(&surf_raw)
                 .map(|m| m.as_str().to_string());
             let surf = parse_any_color(Some(token.as_deref().unwrap_or(&surf_raw)));
+            // Anything the pseudo paints over the box, however faint, sits
+            // between the box's own image and its text (#560). Only nothing,
+            // `none`, and a color too faint to see are known not to paint; a
+            // value the engine cannot read counts as paint.
+            let no_paint = surf_raw.is_empty()
+                || surf_raw.eq_ignore_ascii_case("none")
+                || surf.is_some_and(|c| c.alpha_or_one() <= 0.02);
+            let paints = !no_paint
+                || GRADIENT_RE.is_match(&surf_raw)
+                || js::to_lower_case(&first_of("background-image", "background")).contains("url(");
+            if paints {
+                let ids: Vec<NodeId> = doc
+                    .query_selector_all(base_selector)
+                    .iter()
+                    .map(|e| e.id())
+                    .collect();
+                for id in ids {
+                    doc.set_pseudo_overlay(id);
+                }
+            }
             if let Some(surf) = surf {
                 if surf.alpha_or_one() >= 0.9 && !GRADIENT_RE.is_match(&surf_raw) {
                     let ids: Vec<NodeId> = doc

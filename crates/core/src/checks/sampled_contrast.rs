@@ -134,12 +134,26 @@ fn size_components(value: &str) -> Vec<&str> {
 }
 
 /// Whether a layer tiles along each axis, from its `background-repeat`
-/// entry. `space` and `round` tile too. Anything else (an unresolved
-/// `var()`, a typo) is not known to repeat; no declaration is `repeat`.
+/// entry. `round` tiles too; `space` leaves gaps, and paints once when two
+/// tiles do not fit, so it is not known to fill its axis. A `var()` the
+/// compute loop could not resolve is not known to repeat. Only repeat
+/// keywords are read: the cascade stores a shorthand's bare `var()` as the
+/// repeat, and one that resolved to a color or a position means the
+/// shorthand named no repeat, so the layer tiles as it does with no
+/// declaration at all (a browser drops an invalid longhand the same way).
 fn repeat_axes(repeat: &str) -> (bool, bool) {
     let repeat = repeat.trim().to_ascii_lowercase();
-    let tokens: Vec<&str> = repeat.split_whitespace().collect();
-    let tiles = |token: &str| matches!(token, "repeat" | "space" | "round");
+    if repeat.contains("var(") {
+        return (false, false);
+    }
+    let keyword = |token: &str| {
+        matches!(
+            token,
+            "repeat" | "no-repeat" | "repeat-x" | "repeat-y" | "space" | "round"
+        )
+    };
+    let tokens: Vec<&str> = repeat.split_whitespace().filter(|t| keyword(t)).collect();
+    let tiles = |token: &str| matches!(token, "repeat" | "round");
     match tokens.as_slice() {
         [] => (true, true),
         ["repeat-x"] => (true, false),
@@ -168,12 +182,27 @@ pub fn wash_fills_box(repeat: &str, size: &str, font_size: f64) -> bool {
     fills(parts.first().copied(), repeat_x) && fills(parts.get(1).copied(), repeat_y)
 }
 
-/// What a layer with this `background-repeat` and `background-size` (the
-/// layer's own comma-list entries) paints along each axis, given the image's
-/// intrinsic size and the element's font size for `em`.
+/// Whether a `background-position` keeps the image inside its box: edge and
+/// center keywords and percentages align the image to the box, a zero
+/// length is an edge. Any other length (`0 200px`), a `calc()`, or an
+/// unresolved `var()` can push the image out and expose what is under it.
+fn position_stays_in_box(position: &str) -> bool {
+    let position = position.trim().to_ascii_lowercase();
+    size_components(&position).into_iter().all(|token| {
+        matches!(token, "left" | "right" | "top" | "bottom" | "center")
+            || token.ends_with('%') && !parse_float(token).is_nan()
+            || parse_float(token) == 0.0 && !token.contains('(')
+    })
+}
+
+/// What a layer with this `background-repeat`, `background-size`, and
+/// `background-position` (the layer's own comma-list entries) paints along
+/// each axis, given the image's intrinsic size and the element's font size
+/// for `em`.
 pub fn layer_extents(
     repeat: &str,
     size: &str,
+    position: &str,
     intrinsic_w: f64,
     intrinsic_h: f64,
     font_size: f64,
@@ -215,11 +244,21 @@ pub fn layer_extents(
             }
         }
     };
+    // A tiled axis is filled wherever the image starts; an untiled one
+    // shifted by a length is not known to be.
     if repeat_x {
         x = Extent::Covers;
     }
     if repeat_y {
         y = Extent::Covers;
+    }
+    if !position_stays_in_box(position) {
+        if !repeat_x {
+            x = Extent::Unknown;
+        }
+        if !repeat_y {
+            y = Extent::Unknown;
+        }
     }
     (x, y)
 }
@@ -291,15 +330,8 @@ pub fn sampled_contrast(
     samples: &[Rgba],
     grid_total: usize,
 ) -> Option<Sampled> {
-    if !applies(opts) {
-        return None;
-    }
     let text = opts.text_color?;
-    let needed = ((grid_total as f64) * MIN_SAMPLE_SHARE).ceil().max(1.0) as usize;
-    if samples.len() < needed {
-        return None;
-    }
-    let mut ratios: Vec<f64> = samples
+    let pairs: Vec<(Rgba, Rgba)> = samples
         .iter()
         .map(|bg| {
             let fg = if text.alpha_or_one() < 1.0 {
@@ -307,8 +339,34 @@ pub fn sampled_contrast(
             } else {
                 text
             };
-            contrast_ratio(&fg, bg)
+            (fg, *bg)
         })
+        .collect();
+    sampled_contrast_pairs(opts, ground, &pairs, grid_total)
+}
+
+/// [`sampled_contrast`] over `pairs` of (ink, ground) the caller has already
+/// composited for each sample: the html crate folds the `opacity` of the
+/// boxes between the text and the image into every pair, through the fold
+/// the analytic path uses, where a plain blend of one text color over each
+/// sample would not do.
+pub fn sampled_contrast_pairs(
+    opts: &ColorOpts,
+    ground: &str,
+    pairs: &[(Rgba, Rgba)],
+    grid_total: usize,
+) -> Option<Sampled> {
+    if !applies(opts) {
+        return None;
+    }
+    let text = opts.text_color?;
+    let needed = ((grid_total as f64) * MIN_SAMPLE_SHARE).ceil().max(1.0) as usize;
+    if pairs.len() < needed {
+        return None;
+    }
+    let mut ratios: Vec<f64> = pairs
+        .iter()
+        .map(|(fg, bg)| contrast_ratio(fg, bg))
         .collect();
     ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = ratios.len();
@@ -363,11 +421,15 @@ mod tests {
     }
 
     fn decoration(repeat: &str, size: &str, w: f64, h: f64) -> bool {
-        is_decoration(layer_extents(repeat, size, w, h, 16.0))
+        is_decoration(layer_extents(repeat, size, "", w, h, 16.0))
     }
 
     fn covers(repeat: &str, size: &str) -> bool {
-        covers_box(layer_extents(repeat, size, 1200.0, 800.0, 16.0))
+        covers_box(layer_extents(repeat, size, "", 1200.0, 800.0, 16.0))
+    }
+
+    fn covers_at(repeat: &str, size: &str, position: &str) -> bool {
+        covers_box(layer_extents(repeat, size, position, 1200.0, 800.0, 16.0))
     }
 
     #[test]
@@ -395,9 +457,18 @@ mod tests {
         assert!(!decoration("", "", 16.0, 16.0));
         assert!(!decoration("repeat no-repeat", "auto", 1200.0, 300.0));
         assert!(decoration("repeat no-repeat", "auto", 1200.0, 30.0));
-        // Only a keyword that tiles fills an axis.
-        assert!(!decoration("round space", "auto", 4.0, 4.0));
+        // Only a keyword that tiles fills an axis: `space` leaves gaps.
+        assert!(!decoration("round repeat", "auto", 4.0, 4.0));
+        assert!(decoration("space", "auto", 4.0, 4.0));
+        assert!(decoration("repeat space", "auto", 4.0, 4.0));
         assert!(decoration("var(--tile)", "auto", 4.0, 4.0));
+        // A shorthand's `var()` that resolved to something other than a
+        // repeat named no repeat: the layer tiles. Resolved to one, it is
+        // read.
+        assert!(!decoration("#123456", "auto", 4.0, 4.0));
+        assert!(!decoration("center", "auto", 4.0, 4.0));
+        assert!(decoration("no-repeat", "auto", 4.0, 4.0));
+        assert!(decoration("center no-repeat", "auto", 4.0, 4.0));
     }
 
     #[test]
@@ -417,7 +488,7 @@ mod tests {
         assert!(decoration("no-repeat", "4em 4em", 1200.0, 1200.0));
         assert!(!decoration("no-repeat", "20rem 20rem", 24.0, 24.0));
         assert_eq!(
-            layer_extents("no-repeat", "2em auto", 100.0, 50.0, 20.0),
+            layer_extents("no-repeat", "2em auto", "", 100.0, 50.0, 20.0),
             (Extent::Px(40.0), Extent::Px(20.0))
         );
         // Anything layout would have to resolve keeps the skip.
@@ -448,6 +519,23 @@ mod tests {
         assert!(!wash_fills_box("no-repeat", "50% auto", 16.0));
         assert!(!wash_fills_box("repeat-x", "auto 2rem", 16.0));
         assert!(!wash_fills_box("no-repeat", "var(--w)", 16.0));
+    }
+
+    #[test]
+    fn a_shifted_image_is_not_known_to_cover() {
+        assert!(covers_at("no-repeat", "cover", "center"));
+        assert!(covers_at("no-repeat", "cover", "50% 50%"));
+        assert!(covers_at("no-repeat", "100% 100%", "0 0"));
+        assert!(covers_at("no-repeat", "cover", "right bottom"));
+        assert!(covers_at("no-repeat", "cover", "0% 100%"));
+        // A length offset can expose what is under the image; tiling fills
+        // the box wherever the image starts.
+        assert!(!covers_at("no-repeat", "100% 100%", "0 200px"));
+        assert!(!covers_at("no-repeat", "cover", "center 4rem"));
+        assert!(!covers_at("no-repeat", "cover", "calc(50% - 10px) 0"));
+        assert!(!covers_at("no-repeat", "cover", "var(--pos)"));
+        assert!(covers_at("repeat", "100% 100%", "0 200px"));
+        assert!(!covers_at("repeat-x", "100% 100%", "0 200px"));
     }
 
     #[test]

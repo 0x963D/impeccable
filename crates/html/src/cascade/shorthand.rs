@@ -198,6 +198,14 @@ pub fn parse_static_animation(value: &str) -> StaticAnimation {
 static BG_REPEAT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)^(?:repeat|no-repeat|repeat-x|repeat-y|space|round)$").expect("BG_REPEAT_RE")
 });
+// One `background-position` component: an edge or center keyword, a length
+// or percentage, or a value function the compute loop resolves later.
+static BG_POSITION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)^(?:left|right|top|bottom|center|-?[0-9.]+[a-z%]*|(?:calc|min|max|clamp|env)\(.*\))$",
+    )
+    .expect("BG_POSITION_RE")
+});
 // One `background-size` component: a keyword, a length or percentage, or a
 // value function (`var()`, `calc()`) the compute loop resolves later.
 static BG_SIZE_RE: Lazy<Regex> = Lazy::new(|| {
@@ -243,20 +251,26 @@ fn size_component(token: &str) -> String {
     }
 }
 
-/// The per-layer `background-repeat` and `background-size` lists of a
-/// `background` shorthand (`url(a) center / cover no-repeat, url(b)` ->
-/// `no-repeat, repeat` and `cover, auto`). An image call at the head of a
-/// token is dropped and the rest of the token kept; any other function is a
-/// value and stays whole, so `/ var(--s)` is stored for the compute loop to
-/// resolve instead of collapsing to `auto`.
-fn parse_static_background_layers(value: &str) -> (String, String) {
+/// The per-layer `background-repeat`, `background-size`, and
+/// `background-position` lists of a `background` shorthand (`url(a) center
+/// / cover no-repeat, url(b)` -> `no-repeat, repeat`, `cover, auto`, and
+/// `center, 0% 0%`). An image call at the head of a token is dropped and
+/// the rest of the token kept; any other function is a value and stays
+/// whole, so `/ var(--s)` is stored for the compute loop to resolve instead
+/// of collapsing to `auto`. A bare `var()` among the tokens may hold the
+/// repeat: it is stored as the repeat when no keyword names one, so the
+/// compute loop resolves it and an unresolved one is not read as tiling.
+fn parse_static_background_layers(value: &str) -> (String, String, String) {
     let mut repeats: Vec<String> = Vec::new();
     let mut sizes: Vec<String> = Vec::new();
+    let mut positions: Vec<String> = Vec::new();
     for layer in split_css_list(value) {
         let mut repeat: Vec<String> = Vec::new();
         let mut size: Vec<String> = Vec::new();
+        let mut position: Vec<String> = Vec::new();
+        let mut var_token: Option<String> = None;
         let mut in_size = false;
-        for raw in split_css_tokens(&layer) {
+        for raw in split_css_tokens(&layer).iter().flat_map(|t| unglue(t)) {
             let token: &str = match BG_IMAGE_CALL_RE.find(&raw) {
                 Some(call) => &raw[css_call_end(&raw, call.end() - 1)..],
                 None => raw.as_str(),
@@ -266,8 +280,12 @@ fn parse_static_background_layers(value: &str) -> (String, String) {
                 continue;
             }
             // `center/cover`, `center / cover`, or `center/ cover`: the size
-            // is what follows the slash, one or two values.
-            if let Some((_, after)) = split_size_slash(token) {
+            // is what follows the slash, one or two values; what precedes it
+            // is the last position component.
+            if let Some((before, after)) = split_size_slash(token) {
+                if !before.is_empty() && position.len() < 4 && BG_POSITION_RE.is_match(before) {
+                    position.push(size_component(before));
+                }
                 in_size = true;
                 size.clear();
                 if !after.is_empty() && BG_SIZE_RE.is_match(after) {
@@ -282,20 +300,92 @@ fn parse_static_background_layers(value: &str) -> (String, String) {
             in_size = false;
             if repeat.len() < 2 && BG_REPEAT_RE.is_match(token) {
                 repeat.push(js::to_lower_case(token));
+                continue;
+            }
+            // A bare `var()` may hold the repeat, a color, or a position;
+            // the first one is kept for the repeat slot and none is read as
+            // a position.
+            if VAR_HEAD_TOKEN_RE.is_match(token) {
+                if var_token.is_none() {
+                    var_token = Some(token.to_string());
+                }
+                continue;
+            }
+            if position.len() < 4 && BG_POSITION_RE.is_match(token) {
+                position.push(size_component(token));
             }
         }
-        repeats.push(if repeat.is_empty() {
-            "repeat".into()
-        } else {
-            repeat.join(" ")
+        repeats.push(match (repeat.is_empty(), var_token) {
+            (false, _) => repeat.join(" "),
+            (true, Some(var)) => var,
+            (true, None) => "repeat".into(),
         });
         sizes.push(if size.is_empty() {
             "auto".into()
         } else {
             size.join(" ")
         });
+        positions.push(if position.is_empty() {
+            "0% 0%".into()
+        } else {
+            position.join(" ")
+        });
     }
-    (repeats.join(", "), sizes.join(", "))
+    (repeats.join(", "), sizes.join(", "), positions.join(", "))
+}
+
+static VAR_HEAD_TOKEN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^var\(").expect("VAR_HEAD_TOKEN_RE"));
+
+/// The css-tree generator writes no space where the tokenizer needs none,
+/// so a parsed `url(x.png) center / 100% 100% no-repeat #111` reads
+/// `url(x.png)center/100% 100%no-repeat#111`. One whitespace token may
+/// then hold several components; they are cut apart where the tokenizer
+/// would start the next one: after a top-level `)`, after a `%`, and
+/// before a `#`. Quoted strings and the inside of a call are left alone.
+fn unglue(token: &str) -> Vec<String> {
+    let chars: Vec<char> = token.chars().collect();
+    let starts_component =
+        |c: &char| c.is_ascii_alphanumeric() || matches!(c, '_' | '#' | '.' | '-');
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    for i in 0..chars.len() {
+        let ch = chars[i];
+        if let Some(q) = quote {
+            if ch == q && chars.get(i.wrapping_sub(1)) != Some(&'\\') {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                quote = Some(ch);
+                continue;
+            }
+            '(' => {
+                depth += 1;
+                continue;
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth > 0 {
+            continue;
+        }
+        if ch == '#' && i > start {
+            parts.push(chars[start..i].iter().collect());
+            start = i;
+        } else if matches!(ch, ')' | '%') && chars.get(i + 1).is_some_and(starts_component) {
+            parts.push(chars[start..=i].iter().collect());
+            start = i + 1;
+        }
+    }
+    if start < chars.len() {
+        parts.push(chars[start..].iter().collect());
+    }
+    parts
 }
 
 /// The background color a shorthand names where `expand_static_declaration`
@@ -331,10 +421,11 @@ fn color_outside_image(v: &str) -> Option<String> {
 /// recorded vectors, so what the JS model never carried lives here and
 /// `apply_static_declaration` stores both under one cascade priority:
 ///
-/// - `backgroundRepeat` / `backgroundSize`, so the sampled-contrast path
-///   (#560) can tell a tiled or cover image from a no-repeat icon. Every
-///   `background` shorthand resets both to what it names, the defaults when
-///   it names nothing, as in CSS.
+/// - `backgroundRepeat` / `backgroundSize` / `backgroundPosition`, so the
+///   sampled-contrast path (#560) can tell a tiled or cover image from a
+///   no-repeat icon or a shifted one. Every `background` shorthand resets
+///   all three to what it names, the defaults when it names nothing, as in
+///   CSS.
 /// - `backgroundImage: none` for a shorthand that names no image, which the
 ///   expansion only resets for `background: none`. Without it
 ///   `.card.plain { background: transparent }` keeps the image an earlier
@@ -360,6 +451,7 @@ pub fn background_longhands(prop: &str, value: &str) -> Vec<Expanded> {
         "background" => background_shorthand_longhands(v),
         "background-repeat" => vec![("backgroundRepeat".into(), initial_or(v, "repeat"))],
         "background-size" => vec![("backgroundSize".into(), initial_or(v, "auto"))],
+        "background-position" => vec![("backgroundPosition".into(), initial_or(v, "0% 0%"))],
         // Not part of the shorthand, so it is never reset by one; the
         // sampled-contrast path stands down on any mode but `normal`.
         "background-blend-mode" => vec![("backgroundBlendMode".into(), v.to_string())],
@@ -403,12 +495,14 @@ fn background_shorthand_longhands(v: &str) -> Vec<Expanded> {
         return vec![
             ("backgroundRepeat".into(), initial_or(v, "repeat")),
             ("backgroundSize".into(), initial_or(v, "auto")),
+            ("backgroundPosition".into(), initial_or(v, "0% 0%")),
         ];
     }
-    let (repeat, size) = parse_static_background_layers(v);
+    let (repeat, size, position) = parse_static_background_layers(v);
     let mut out: Vec<Expanded> = vec![
         ("backgroundRepeat".into(), repeat),
         ("backgroundSize".into(), size),
+        ("backgroundPosition".into(), position),
     ];
     if !has_image {
         // Neither a `url()` nor a gradient. A shorthand that names no image
