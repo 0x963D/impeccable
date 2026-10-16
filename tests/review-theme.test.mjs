@@ -2,8 +2,9 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { engineEnv, findEngineBinary, ENGINE_MISSING_MESSAGE } from './lib/engine-bin.mjs';
@@ -84,9 +85,39 @@ async function appearance(page, selector) {
   });
 }
 
+async function readableText(page, selector, backgroundSelector) {
+  const ratio = await page.locator(selector).evaluate((el, bgSelector) => {
+    const ctx = document.createElement('canvas').getContext('2d');
+    const luminance = color => {
+      ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1);
+      const rgb = [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3).map(v => {
+        const s = v / 255;
+        return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+      });
+      return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+    };
+    const root = el.getRootNode();
+    const fg = luminance(getComputedStyle(el).color);
+    const bg = luminance(getComputedStyle(root.querySelector(bgSelector)).backgroundColor);
+    return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+  }, backgroundSelector);
+  assert.ok(ratio >= 4.5, `${selector} contrast ${ratio.toFixed(2)} must reach 4.5:1`);
+}
+
+async function waitForExit(pid) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); }
+    catch (error) { if (error.code === 'ESRCH') return; throw error; }
+    await delay(20);
+  }
+  throw new Error(`Review server ${pid} did not stop`);
+}
+
 test('picker follows live OS changes while comp pixels and their background stay fixed', async () => {
   const cwd = mkdtempSync(path.join(tmpdir(), 'review-theme-picker-'));
   const key = 'theme';
+  let serverPid;
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light', reducedMotion: 'reduce' });
   try {
     await image(cwd);
@@ -98,6 +129,7 @@ test('picker follows live OS changes while comp pixels and their background stay
     const started = await run(cwd, 'serve-question', '--start', '--payload', 'question.json', '--no-open', '--key', key);
     const url = started.match(/QUESTION URL: (\S+)/)?.[1];
     assert.ok(url, started);
+    serverPid = JSON.parse(readFileSync(path.join(cwd, '.impeccable', 'questions', `${key}.state.json`))).pid;
     await page.goto(url);
     const art = page.locator('.media > img').first();
     await art.evaluate(img => img.decode());
@@ -109,6 +141,8 @@ test('picker follows live OS changes while comp pixels and their background stay
     await screenshot(page, 'picker-dark-desktop');
     assert.notEqual(dark.background, light.background);
     assert.equal(dark.scheme, 'dark');
+    await readableText(page, '.question', 'body');
+    await readableText(page, '.face.front h2', '.face.front');
     await samePixels(page, lightArt, await pixels(page, art));
     await art.click();
     await page.locator('#lightbox.open').waitFor();
@@ -137,7 +171,8 @@ test('picker follows live OS changes while comp pixels and their background stay
   } finally {
     await page.close();
     await run(cwd, 'serve-question', '--stop', '--key', key);
-    rmSync(cwd, { recursive: true, force: true });
+    if (serverPid) await waitForExit(serverPid);
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -150,7 +185,7 @@ async function componentServer(cwd, manifest) {
   mkdirSync(path.join(project, '.impeccable', 'build'), { recursive: true });
   writeFileSync(path.join(project, '.impeccable', 'build', 'spec.json'), spec);
   if (manifest.schemaVersion === 3) manifest.specSha256 = createHash('sha256').update(spec).digest('hex');
-  writeFileSync(path.join(project, 'preview.html'), '<!doctype html><style>:root{color-scheme:light dark}body{margin:0;background:light-dark(#eee,#222)}</style><p>Preview</p>');
+  writeFileSync(path.join(project, 'preview.html'), '<!doctype html><style>:root{color-scheme:light}body{margin:0;background:#eee;color:#222}</style><p>Preview</p>');
   writeFileSync(path.join(project, 'review.json'), JSON.stringify(manifest));
   const prepared = JSON.parse(await run(project, 'component-review', 'prepare', '--manifest', 'review.json', '--store', store));
   const child = spawn(engine, ['component-review', 'serve', '--session', prepared.session, '--store', store, '--port', '0', '--idle-timeout', '60'], {
@@ -171,24 +206,26 @@ async function componentServer(cwd, manifest) {
   return { url, child };
 }
 
-for (const plan of [false, true]) {
-  test(`${plan ? 'plan' : 'component'} review follows OS chrome and preserves preview pixels`, async () => {
+for (const kind of ['component', 'plan', 'page']) {
+  const plan = kind === 'plan';
+  test(`${kind} review follows OS chrome and preserves preview pixels`, async () => {
     const cwd = mkdtempSync(path.join(tmpdir(), 'review-theme-components-'));
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light', reducedMotion: 'reduce' });
     let child;
     try {
       const manifest = {
-        schemaVersion: plan ? 3 : 1, id: 'theme-review', stage: 'components', title: 'Theme review',
+        schemaVersion: plan ? 3 : 1, id: 'theme-review', stage: kind === 'page' ? 'hero' : 'components', title: 'Theme review',
         comp: { path: 'sample.png', width: 640, height: 400, background: '#e8d8b8' },
         components: [{ id: 'art', name: 'Review sample', kind: 'image', role: 'asset', medium: 'Raster', note: 'Transparent sample',
           box: { x: 0, y: 0, w: 1, h: 1 }, preview: { kind: 'image', path: 'sample.png' }, dependencies: [],
           material: { format: 'png', width: 640, height: 400, alpha: 'transparent' } }],
       };
+      if (kind === 'page') manifest.components[0].preview = { kind: 'page', path: 'preview.html' };
       if (plan) manifest.codeRegions = [];
       const server = await componentServer(cwd, manifest);
       child = server.child;
       await page.goto(server.url);
-      const prefix = plan ? 'plan' : 'component';
+      const prefix = kind;
       if (plan) await page.getByRole('button', { name: /Start/ }).click();
       const shell = plan ? '.rv' : '.review';
       const art = page.locator(plan ? '.frame > .pic.gen' : '.output.crop-stage');
@@ -200,6 +237,7 @@ for (const plan of [false, true]) {
       await page.emulateMedia({ colorScheme: 'dark' });
       await screenshot(page, `${prefix}-dark-desktop`);
       assert.notEqual((await appearance(page, shell)).background, light.background);
+      await readableText(page, plan ? '.bar-name' : kind === 'page' ? '.review h1' : '.material strong', shell);
       await samePixels(page, lightArt, await pixels(page, art));
       if (plan) {
         await page.locator('#backdrop').click();
@@ -208,7 +246,7 @@ for (const plan of [false, true]) {
         await samePixels(page, onLight, await pixels(page, art));
         await page.emulateMedia({ colorScheme: 'dark' });
       } else {
-        await page.getByRole('button', { name: 'Expand comparison' }).click();
+        await page.getByRole('button', { name: 'Enlarge comparison' }).click();
         await page.getByRole('dialog').waitFor();
         await screenshot(page, 'component-dark-expanded');
         await page.keyboard.press('Escape');
@@ -227,7 +265,7 @@ for (const plan of [false, true]) {
         child.kill();
         await new Promise(resolve => child.once('exit', resolve));
       }
-      rmSync(cwd, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 }

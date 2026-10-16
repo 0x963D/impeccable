@@ -244,6 +244,10 @@ export const SUITES = {
       ...COMMON_INFRA_PATTERNS,
       /^ENGINE_VERSION$/,
       /^tests\/new-work-e2e(\.test\.mjs|\/)/,
+      /^tests\/review-theme\.test\.mjs$/,
+      /^ui\/component-review\//,
+      /^crates\/context\/src\/(question_page|serve_question)\.rs$/,
+      /^crates\/context\/src\/component_review\/server\.rs$/,
     ],
     commands: [
       {
