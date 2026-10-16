@@ -163,8 +163,8 @@ test('picker follows live OS changes while comp pixels and their background stay
     await page.locator('#steer').focus();
     assert.notEqual(await page.locator('#steer').evaluate(el => getComputedStyle(el).outlineStyle), 'none');
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth, null, { timeout: 5000 });
     await screenshot(page, 'picker-dark-mobile');
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.locator('.choose').first().click();
     await page.locator('.done').waitFor();
     assert.equal((await appearance(page, 'body')).scheme, 'dark');
@@ -259,8 +259,8 @@ for (const kind of ['component', 'plan', 'page']) {
         await page.keyboard.press('Escape');
       }
       await page.setViewportSize({ width: 390, height: 844 });
+      await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth, null, { timeout: 5000 });
       await screenshot(page, `${prefix}-dark-mobile`);
-      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await page.route('**/packet', route => route.fulfill({ status: 500, body: 'Unavailable' }));
       await page.reload();
       await page.getByRole('alert').waitFor();
