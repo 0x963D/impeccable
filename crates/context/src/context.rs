@@ -594,11 +594,12 @@ const UI_DEPENDENCIES: [&str; 32] = [
 const UI_DEPENDENCY_PREFIXES: [&str; 3] = ["@storybook/", "@remix-run/", "@react-router/"];
 /// Fixed paths that mark a UI entry: HTML entries, and the native app
 /// markers `staleness.rs` reads as native evidence plus Android manifests.
-const UI_ENTRY_PATHS: [&str; 11] = [
+/// `pubspec.yaml` is checked separately: every Dart package has one, so only
+/// a Flutter one counts (`is_flutter_pubspec`).
+const UI_ENTRY_PATHS: [&str; 10] = [
     "index.html",
     "public/index.html",
     "src/index.html",
-    "pubspec.yaml",
     "ios/Podfile",
     "ios/Runner.xcodeproj",
     "android/build.gradle",
@@ -609,6 +610,15 @@ const UI_ENTRY_PATHS: [&str; 11] = [
 ];
 /// Directories listed one level deep (never recursed) for a UI or style file.
 const UI_SHALLOW_DIRS: [&str; 9] = ["", "src", "app", "pages", "components", "public", "static", "styles", "templates"];
+
+static FLUTTER_PUBSPEC_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^\s*(sdk:\s*flutter\b|flutter:\s*(#.*)?$)").unwrap());
+
+/// A pubspec that depends on the Flutter SDK or carries a `flutter:` section.
+/// A pure Dart package (models, CLI, API client) has neither.
+fn is_flutter_pubspec(body: &str) -> bool {
+    FLUTTER_PUBSPEC_RE.is_match(body)
+}
 
 /// A workspace shows a UI signal when its package.json depends on a UI
 /// framework, it has its own PRODUCT.md or DESIGN.md, a fixed UI entry path
@@ -631,6 +641,9 @@ pub fn has_ui_signal(root: &str) -> bool {
         return true;
     }
     if UI_ENTRY_PATHS.iter().any(|rel| exists(&jsp::join(&[root, rel]))) {
+        return true;
+    }
+    if safe_read(&jsp::join(&[root, "pubspec.yaml"])).is_some_and(|body| is_flutter_pubspec(&body)) {
         return true;
     }
     UI_SHALLOW_DIRS.iter().any(|rel| {
@@ -1468,7 +1481,14 @@ mod ui_target_tests {
         assert!(has_ui_signal(&at("packages/stories")));
         assert!(has_ui_signal(&at("packages/plain-css")));
         // Native apps carry no web dependency or HTML entry (review on #1047).
-        t.put("apps/flutter/pubspec.yaml", "name: flutter_app\n");
+        t.put(
+            "apps/flutter/pubspec.yaml",
+            "name: flutter_app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+        );
+        // A pure Dart package is not a UI (review on #1047).
+        t.put("packages/models/pubspec.yaml", "name: models\ndependencies:\n  json_annotation: ^4.0.0\n");
+        t.put("packages/models/lib/models.dart", "class User {}\n");
+        assert!(!has_ui_signal(&at("packages/models")));
         t.put("apps/flutter/lib/main.dart", "void main() {}\n");
         t.put("apps/ios/ios/Podfile", "platform :ios, '15.0'\n");
         t.put("apps/swift/Demo.xcodeproj/project.pbxproj", "// pbx\n");
@@ -1505,7 +1525,7 @@ mod ui_target_tests {
     fn native_app_beside_a_web_app_stays_listed() {
         let t = Tmp::new("native");
         monorepo(&t);
-        t.put("apps/mobile/pubspec.yaml", "name: mobile\n");
+        t.put("apps/mobile/pubspec.yaml", "name: mobile\nflutter:\n  uses-material-design: true\n");
         t.put("apps/mobile/lib/main.dart", "void main() {}\n");
         let (cands, skipped) = discover_ui_target_candidates(&t.root(), &env());
         assert!(paths(&cands).contains(&"apps/mobile"));
