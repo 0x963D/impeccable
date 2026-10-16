@@ -250,7 +250,7 @@ export const SUITES = {
         runner: 'node',
         timeoutMs: 600000,
         forceExit: true,
-        files: ['tests/new-work-e2e.test.mjs'],
+        files: ['tests/new-work-e2e.test.mjs', 'tests/review-theme.test.mjs'],
       },
     ],
   },
