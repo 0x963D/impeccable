@@ -8,6 +8,7 @@ export const OPT_IN_SUITES = [
   'live-e2e-accept-cleanup',
   'new-work-e2e',
   'skill-behavior',
+  'skill-activation',
   'skill-workflow',
   'live-svelte-adapter-deepseek',
 ];
@@ -295,6 +296,20 @@ export const SUITES = {
       timeoutMs: 240000,
       wallClockMs: 1_800_000,
       files: ['tests/skill-behavior/scenarios.test.mjs'],
+    }],
+  },
+  'skill-activation': {
+    description: 'LLM-backed check that the skill description triggers on UI work and stays quiet otherwise.',
+    optIn: true,
+    triggers: [
+      /^skill\/SKILL\.src\.md$/,
+      /^tests\/skill-behavior\/(activation-cases|providers)\.mjs$/,
+    ],
+    commands: [{
+      runner: 'node',
+      timeoutMs: 900000,
+      wallClockMs: 1_200_000,
+      files: ['tests/skill-behavior/activation.eval.mjs'],
     }],
   },
   'skill-workflow': {
