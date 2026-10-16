@@ -38,9 +38,9 @@ async function screenshot(page, name) {
 }
 
 // Exclude rounded borders and overlaid chrome from the inspected image's pixels.
-async function pixels(page, art) {
+async function pixels(page, art, bottomInset = 52) {
   const box = await art.boundingBox();
-  return page.screenshot({ clip: { x: box.x + 12, y: box.y + 12, width: box.width - 24, height: box.height - 52 }, animations: 'disabled' });
+  return page.screenshot({ clip: { x: box.x + 12, y: box.y + 12, width: box.width - 24, height: box.height - bottomInset }, animations: 'disabled' });
 }
 
 async function samePixels(page, before, after) {
@@ -123,18 +123,26 @@ test('picker follows live OS changes while comp pixels and their background stay
     await image(cwd);
     writeFileSync(path.join(cwd, 'question.json'), JSON.stringify({
       title: 'Choose a direction', question: 'Compare the artwork on its own background.',
-      options: [{ id: 'sample', kind: 'assigned', label: 'Review sample', hero: path.join(cwd, 'sample.png') }],
+      options: [
+        { id: 'sample', kind: 'assigned', label: 'Review sample', hero: path.join(cwd, 'sample.png') },
+        { id: 'sketch', kind: 'dealt', label: 'Transparent sketch', html: 'sketch.html' },
+      ],
       steer: true, reroll: true, buildPath: { value: 'code', toggle: true },
     }));
     const started = await run(cwd, 'serve-question', '--start', '--payload', 'question.json', '--no-open', '--key', key);
     const url = started.match(/QUESTION URL: (\S+)/)?.[1];
     assert.ok(url, started);
     serverPid = JSON.parse(readFileSync(path.join(cwd, '.impeccable', 'questions', `${key}.state.json`))).pid;
+    // Keep the sketch static: its own media queries also react to emulation on the original light-only picker.
+    writeFileSync(path.join(cwd, 'sketch.html'), '<!doctype html><style>:root{color-scheme:light}body{margin:0}div{margin:120px;width:340px;height:220px;background:#2c8176}</style><div></div>');
     await page.goto(url);
     const art = page.locator('.media > img').first();
     await art.evaluate(img => img.decode());
+    const sketch = page.locator('.media.html:not(.html-pending)');
+    await sketch.waitFor();
     const light = await appearance(page, 'body');
     const lightArt = await pixels(page, art);
+    const lightSketch = await pixels(page, sketch, 80);
     await screenshot(page, 'picker-light-desktop');
     await page.emulateMedia({ colorScheme: 'dark' });
     const dark = await appearance(page, 'body');
@@ -142,8 +150,9 @@ test('picker follows live OS changes while comp pixels and their background stay
     assert.notEqual(dark.background, light.background);
     assert.equal(dark.scheme, 'dark');
     await readableText(page, '.question', 'body');
-    await readableText(page, '.face.front h2', '.face.front');
+    await readableText(page, '.card[data-id="sample"] .face.front h2', '.card[data-id="sample"] .face.front');
     await samePixels(page, lightArt, await pixels(page, art));
+    await samePixels(page, lightSketch, await pixels(page, sketch, 80));
     await art.click();
     await page.locator('#lightbox.open').waitFor();
     const darkLightbox = await appearance(page, '#lightbox');
@@ -233,12 +242,15 @@ for (const kind of ['component', 'plan', 'page']) {
       await page.evaluate(() => document.fonts.ready);
       const light = await appearance(page, shell);
       const lightArt = await pixels(page, art);
+      const locator = plan ? page.locator('.locator-map') : null;
+      const lightLocator = locator ? await pixels(page, locator) : null;
       await screenshot(page, `${prefix}-light-desktop`);
       await page.emulateMedia({ colorScheme: 'dark' });
       await screenshot(page, `${prefix}-dark-desktop`);
       assert.notEqual((await appearance(page, shell)).background, light.background);
       await readableText(page, plan ? '.bar-name' : kind === 'page' ? '.review h1' : '.material strong', shell);
       await samePixels(page, lightArt, await pixels(page, art));
+      if (locator) await samePixels(page, lightLocator, await pixels(page, locator));
       if (plan) {
         await page.locator('#backdrop').click();
         const onLight = await pixels(page, art);
@@ -276,3 +288,59 @@ for (const kind of ['component', 'plan', 'page']) {
     }
   });
 }
+
+test('grouped previews keep their original mattes and approved dimming in either OS theme', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'review-theme-groups-'));
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light', reducedMotion: 'reduce' });
+  let child;
+  try {
+    const server = await componentServer(cwd, {
+      schemaVersion: 1, id: 'group-theme', stage: 'components', title: 'Grouped preview theme',
+      comp: { path: 'sample.png', width: 640, height: 400, background: '#e8d8b8' },
+      components: [0, 1].map(i => ({
+        id: `control-${i}`, name: `Control ${i + 1}`, kind: 'control', medium: 'HTML / CSS', note: 'Repeated control',
+        reviewGroup: 'controls', box: { x: i / 2, y: 0, w: 0.5, h: 1 },
+        preview: { kind: 'page', path: 'preview.html' }, thumbnail: { kind: 'image', path: 'sample.png' }, dependencies: [],
+      })),
+    });
+    child = server.child;
+    await page.goto(server.url);
+    await page.locator('.instance-produced img').first().evaluate(img => img.decode());
+    let pendingPixels;
+    for (const approved of [false, true]) {
+      if (approved) {
+        await page.locator('.instance-row').first().click();
+        await page.getByRole('button', { name: 'Looks good', exact: true }).click();
+        await page.locator('.instance-row.approved').waitFor();
+        await page.locator('.instance-produced img').first().evaluate(img => img.decode());
+      }
+      for (const hovered of [false, true]) {
+        const art = page.locator('.instance-produced').first();
+        if (hovered) await art.hover();
+        else await page.mouse.move(0, 0);
+        await page.emulateMedia({ colorScheme: 'light' });
+        const light = await pixels(page, art);
+        const reference = page.locator('.instance-reference').first();
+        const lightReference = await pixels(page, reference);
+        if (!hovered) {
+          if (approved) assert.notDeepEqual(light, pendingPixels, 'approved previews retain their original dimming');
+          else pendingPixels = light;
+        }
+        await page.emulateMedia({ colorScheme: 'dark' });
+        await samePixels(page, light, await pixels(page, art));
+        await samePixels(page, lightReference, await pixels(page, reference));
+        await screenshot(page, `group-${approved ? 'approved' : 'pending'}-${hovered ? 'hover' : 'normal'}-dark`);
+      }
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth, null, { timeout: 5000 });
+    await screenshot(page, 'group-dark-mobile');
+  } finally {
+    await page.close();
+    if (child && child.exitCode === null) {
+      child.kill();
+      await new Promise(resolve => child.once('exit', resolve));
+    }
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

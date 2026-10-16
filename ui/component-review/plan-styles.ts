@@ -142,7 +142,7 @@ button.region:hover{opacity:1;background-color:oklch(99.5% 0 0 / .14);z-index:4}
 .hint .cap{margin:0 2px;height:18px}
 .hint.gone,.undo-line.gone{opacity:0;pointer-events:none}
 .locator{position:absolute;left:28px;bottom:14px;display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:0;border:0;background:none;color:var(--ks-text-muted)}
-.locator-map{position:relative;display:block;width:128px;overflow:hidden;box-shadow:0 0 0 1px var(--ks-rule);transition:box-shadow var(--ks-quick) var(--ks-ease)}
+.locator-map{position:relative;display:block;width:128px;overflow:hidden;background:var(--review-media-paper);box-shadow:0 0 0 1px var(--ks-rule);transition:box-shadow var(--ks-quick) var(--ks-ease)}
 .locator-map img{display:block;width:100%;height:100%}
 .locator-box{position:absolute;outline:1.5px solid var(--ks-paper-raised);box-shadow:0 0 0 1px var(--ks-ink),0 0 0 100vmax oklch(13% 0 0 / .3)}
 .locator:hover .locator-map{box-shadow:0 0 0 1px var(--ks-edge),var(--ks-lift-1)}

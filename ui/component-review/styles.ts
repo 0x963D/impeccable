@@ -109,9 +109,13 @@ export const styles = `
 .instance-pair{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:16px}
 .instance-reference{justify-self:center;display:block;position:relative;overflow:hidden;max-height:180px;width:100%;background:var(--comp-background)}
 .instance-reference img{position:absolute;max-width:none;height:auto}
-.instance-produced{justify-self:center;display:flex;align-items:center;justify-content:center;min-height:36px;max-height:180px;overflow:hidden}
+.instance-produced{position:relative;justify-self:center;display:flex;align-items:center;justify-content:center;min-height:36px;max-height:180px;overflow:hidden;background:var(--review-media-paper)}
+.instance-row:hover .instance-produced{background:var(--review-media-deep)}
 .instance-produced img{display:block;width:100%;height:100%;object-fit:contain}
-.instance-row.approved{opacity:.65}.instance-row.feedback .instance-caption>span{color:var(--warn)}
+.instance-row.approved>:not(.instance-pair){opacity:.65}
+/* Preserve approved artwork's original fade against paper, independent of the chrome. */
+.instance-row.approved .instance-reference::after,.instance-row.approved .instance-produced::after{content:"";position:absolute;inset:0;z-index:3;background:var(--review-media-paper);opacity:.35;pointer-events:none}
+.instance-row.feedback .instance-caption>span{color:var(--warn)}
 .item strong small{font-size:11px;white-space:nowrap;color:var(--muted)}
 #comparison-dialog .group-overview{overflow:auto;min-height:0}
 #comparison-dialog .group-overview>.compare-toolbar{top:0}

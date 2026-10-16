@@ -237,7 +237,7 @@ export const SUITES = {
     ],
   },
   'new-work-e2e': {
-    description: 'Playwright smoke sweep of the new-work concept/serve-question decision page plus the offline fake image generator.',
+    description: 'Playwright smoke checks of native decision and review pages, plus the offline fake image generator.',
     optIn: true,
     needsPlaywright: true,
     triggers: [
