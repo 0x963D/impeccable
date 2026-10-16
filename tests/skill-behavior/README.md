@@ -47,7 +47,7 @@ such as frontend-dev, docs-writer, dataviz and brand-identity, from
 naming `impeccable`; starting the work directly or loading another skill is a
 miss.
 
-The 53 cases are 33 positives (every command family, five document-shaped
+The 54 cases are 34 positives (every command family, five document-shaped
 requests, three native) and 20 negatives (clear non-UI work plus the #744 near
 neighbours: frontend code with no visual decision, and visual work that is not
 an interface). Cases ending in `_744` are the pinned #744 prompts.
@@ -102,6 +102,11 @@ What the measurement found:
   about 135 runs with four steps and stubbed results). Polish, accessibility
   review, empty states, responsive fixes and edge-case hardening miss on
   Sonnet under every description tried; wording alone does not reach them.
+- A direct UI performance ask (`ui_performance`, added after the baseline
+  above) fired 0/3 on both models under both descriptions: dropping
+  "performance" and "optimize" from the description lost nothing there, and
+  naming them did not help either. Through the gate it costs about one
+  point of recall.
 - Gemini's misses mostly go to the frontend-dev neighbour, so results depend
   on the roster. The roster is a guess at a typical install, not a measurement.
 

@@ -33,7 +33,7 @@
  *   ACTIVATION_OUT=path.json                            write raw results
  *   ACTIVATION_REPORT=path.json                         re-print a report from saved results
  *
- * Cost: the default run is 53 cases x 2 samples x 2 models = 212 single-step
+ * Cost: the default run is 54 cases x 2 samples x 2 models = 216 single-step
  * calls, about 2k input tokens each: roughly $1 on Sonnet and cents on Gemini.
  * Each extra variant adds the same again. ACTIVATION_STEPS=4 roughly doubles
  * the Sonnet cost even with prompt caching. Keys come from the repo-root .env;
@@ -140,9 +140,14 @@ async function runOne(modelId, description, prompt, steps) {
         maxOutputTokens: 2048,
       });
       const calls = result.steps.flatMap((st) => st.toolCalls ?? []);
-      const skillCall = calls.find((t) => t.toolName === 'Skill');
+      // A response can load several skills (frontend-dev, then impeccable).
+      // Any impeccable load counts; otherwise report the first skill named.
+      const loaded = calls
+        .filter((t) => t.toolName === 'Skill')
+        .map((t) => String(t.input?.skill ?? '').replace(/^\//, ''));
       return {
-        skill: skillCall ? String(skillCall.input?.skill ?? '').replace(/^\//, '') : null,
+        skill: loaded.includes('impeccable') ? 'impeccable' : (loaded[0] ?? null),
+        skillsLoaded: loaded,
         firstTool: calls[0]?.toolName ?? 'text',
         steps: result.steps.length,
         usage: result.totalUsage ?? result.usage,

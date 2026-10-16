@@ -289,7 +289,9 @@ export const SUITES = {
       /^skill\/SKILL\.src\.md$/,
       /^skill\/reference\//,
       /^ENGINE_VERSION$/,
-      /^tests\/skill-behavior\//,
+      // activation.eval.mjs and its fixtures belong to skill-activation, which
+      // nothing here loads; editing them should not bill this lane.
+      /^tests\/skill-behavior\/(?!activation[.-])/,
     ],
     commands: [{
       runner: 'node',
@@ -321,7 +323,9 @@ export const SUITES = {
       /^skill\//,
       /^ENGINE_VERSION$/,
       /^tests\/skill-workflow\//,
-      /^tests\/skill-behavior\//,
+      // activation.eval.mjs and its fixtures belong to skill-activation, which
+      // nothing here loads; editing them should not bill this lane.
+      /^tests\/skill-behavior\/(?!activation[.-])/,
     ],
     commands: [
       { runner: 'node', files: ['tests/skill-workflow-browser.test.mjs'] },

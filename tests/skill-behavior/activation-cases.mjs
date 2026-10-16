@@ -52,6 +52,7 @@ export const CASES = [
   { id: 'dashboard', cat: 'build', expect: true, prompt: 'Build an admin dashboard showing signups, revenue and churn, with a recent-activity table.' },
   { id: 'responsive', cat: 'responsive', expect: true, prompt: 'The nav and the pricing cards break on phones: they overflow and the text is tiny. Fix it for mobile.' },
   { id: 'harden_errors', cat: 'harden', expect: true, prompt: 'Make the file upload component handle the ugly cases well: long filenames, errors, slow networks, 0 files, 500 files.' },
+  { id: 'ui_performance', cat: 'optimize', expect: true, prompt: 'The product list stutters when you scroll and the filters feel sluggish on mid-range laptops. Make the interface feel fast.' },
   { id: 'clarify_distill', cat: 'distill', expect: true, prompt: 'The project creation form has 14 fields and people abandon it. Simplify it.' },
   { id: 'component', cat: 'build', expect: true, prompt: 'Make a nice-looking date range picker component for our design system.' },
   { id: 'overdrive', cat: 'overdrive', expect: true, prompt: 'I want the hero of our portfolio to have a jaw-dropping WebGL effect that reacts to the cursor.' },
