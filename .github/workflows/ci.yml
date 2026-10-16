@@ -321,7 +321,7 @@ jobs:
       - name: Verify review workflows and system themes
         env:
           IMPECCABLE_BIN: ${{ github.workspace }}/target/release/impeccable
-        run: node --test tests/new-work-e2e.test.mjs tests/review-theme.test.mjs
+        run: node --test --test-timeout=180000 tests/new-work-e2e.test.mjs tests/review-theme.test.mjs
 
   # Release-order guard (triage decision D4). Verifies that the engine release for
   # the pinned ENGINE_VERSION is fully published — the five dist binaries + .sha256

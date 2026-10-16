@@ -246,6 +246,13 @@ for (const kind of ['component', 'plan', 'page']) {
         await samePixels(page, onLight, await pixels(page, art));
         await page.emulateMedia({ colorScheme: 'dark' });
       } else {
+        if (kind === 'component') {
+          await page.getByRole('button', { name: 'Page color background' }).click();
+          const onPage = await pixels(page, art);
+          await page.emulateMedia({ colorScheme: 'light' });
+          await samePixels(page, onPage, await pixels(page, art));
+          await page.emulateMedia({ colorScheme: 'dark' });
+        }
         await page.getByRole('button', { name: 'Enlarge comparison' }).click();
         await page.getByRole('dialog').waitFor();
         await screenshot(page, 'component-dark-expanded');

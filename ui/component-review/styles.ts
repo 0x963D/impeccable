@@ -141,7 +141,7 @@ export const styles = `
 .inspector>.section-head{background:transparent;border-bottom:1px solid var(--ks-rule);box-shadow:none!important}
 .inspection-content{background:transparent}
 .inspector>.review-form{background:transparent;border-top:1px solid var(--ks-rule);box-shadow:none!important}
-.pan-viewport{background:transparent}.crop-stage{background:var(--comp-background,var(--review-media-deep))}
+.pan-viewport{background:transparent}.crop-stage:not(.checker){background:var(--comp-background,var(--review-media-deep))}
 .pan-viewport{border:0;box-shadow:none;border-radius:0}
 .crop-stage{box-shadow:0 0 0 1px var(--ks-rule)}
 .review>.inventory-section{box-shadow:none;border-top:1px solid var(--ks-rule)}
