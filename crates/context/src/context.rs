@@ -584,19 +584,38 @@ fn build_target_candidate(repo_root: &str, rel: String, root: String, env: &Env)
 
 /// Dependencies that mark a workspace as rendering a UI. Matched against the
 /// keys of `dependencies`, `devDependencies`, and `peerDependencies`.
-const UI_DEPENDENCIES: [&str; 31] = [
-    "react", "react-dom", "react-native", "expo", "next", "gatsby", "@remix-run/react", "react-router",
-    "vue", "nuxt", "svelte", "@sveltejs/kit", "solid-js", "@solidjs/start", "preact", "lit", "astro",
-    "@angular/core", "@builder.io/qwik", "ember-source", "alpinejs", "htmx.org", "vite", "storybook",
-    "@11ty/eleventy", "@docusaurus/core", "vitepress", "electron", "@tauri-apps/api", "@ionic/core",
+const UI_DEPENDENCIES: [&str; 32] = [
+    "react", "react-dom", "react-native", "@react-native/metro-config", "expo", "next", "gatsby",
+    "@remix-run/react", "react-router", "vue", "nuxt", "svelte", "@sveltejs/kit", "solid-js", "@solidjs/start",
+    "preact", "lit", "astro", "@angular/core", "@builder.io/qwik", "ember-source", "alpinejs", "htmx.org", "vite",
+    "storybook", "@11ty/eleventy", "@docusaurus/core", "vitepress", "electron", "@tauri-apps/api", "@ionic/core",
     "@stencil/core",
 ];
 const UI_DEPENDENCY_PREFIXES: [&str; 3] = ["@storybook/", "@remix-run/", "@react-router/"];
-const UI_ENTRY_HTML: [&str; 3] = ["index.html", "public/index.html", "src/index.html"];
+/// Fixed paths that mark a UI entry: HTML entries, and the native app
+/// markers `staleness.rs` reads as native evidence plus Android manifests.
+const UI_ENTRY_PATHS: [&str; 11] = [
+    "index.html",
+    "public/index.html",
+    "src/index.html",
+    "pubspec.yaml",
+    "ios/Podfile",
+    "ios/Runner.xcodeproj",
+    "android/build.gradle",
+    "android/build.gradle.kts",
+    "app/src/main/AndroidManifest.xml",
+    "src/main/AndroidManifest.xml",
+    "angular.json",
+];
+/// Directories listed one level deep (never recursed) for a UI or style file.
+const UI_SHALLOW_DIRS: [&str; 9] = ["", "src", "app", "pages", "components", "public", "static", "styles", "templates"];
 
 /// A workspace shows a UI signal when its package.json depends on a UI
-/// framework, it has an `index.html` entry, or the bounded visual scan finds
-/// styled source. Cheapest checks first; the scan runs only when they miss.
+/// framework, it has its own PRODUCT.md or DESIGN.md, a fixed UI entry path
+/// exists (HTML entry, native app marker), or a one-level listing of the
+/// workspace root or a usual source dir holds a UI or style file (or an
+/// Xcode project). Every check is a read, a stat or a single directory
+/// listing, so the boot never walks a workspace tree (Tier-1 budget).
 pub fn has_ui_signal(root: &str) -> bool {
     if let Some(pkg) = read_json(&jsp::join(&[root, "package.json"])) {
         for field in ["dependencies", "devDependencies", "peerDependencies"] {
@@ -608,10 +627,25 @@ pub fn has_ui_signal(root: &str) -> bool {
             }
         }
     }
-    if UI_ENTRY_HTML.iter().any(|rel| exists(&jsp::join(&[root, rel]))) {
+    if first_existing(root, &all_context_names()).is_some() {
         return true;
     }
-    has_visual_implementation(root)
+    if UI_ENTRY_PATHS.iter().any(|rel| exists(&jsp::join(&[root, rel]))) {
+        return true;
+    }
+    UI_SHALLOW_DIRS.iter().any(|rel| {
+        let dir = if rel.is_empty() { root.to_string() } else { jsp::join(&[root, rel]) };
+        let Some(entries) = read_dir_entries(&dir) else { return false };
+        entries.iter().any(|e| {
+            let ext = jsp::extname(&e.name).to_lowercase();
+            if e.is_dir {
+                return rel.is_empty() && (ext == ".xcodeproj" || ext == ".xcworkspace");
+            }
+            e.is_file
+                && (UI_EXTENSIONS.contains(&ext.as_str()) || STYLE_EXTENSIONS.contains(&ext.as_str()))
+                && !RE_MIN.is_match(&e.name.to_lowercase())
+        })
+    })
 }
 
 /// Approximation of `String.prototype.localeCompare` (ICU root collation) for
@@ -1433,6 +1467,19 @@ mod ui_target_tests {
         assert!(has_ui_signal(&at("packages/ui")));
         assert!(has_ui_signal(&at("packages/stories")));
         assert!(has_ui_signal(&at("packages/plain-css")));
+        // Native apps carry no web dependency or HTML entry (review on #1047).
+        t.put("apps/flutter/pubspec.yaml", "name: flutter_app\n");
+        t.put("apps/flutter/lib/main.dart", "void main() {}\n");
+        t.put("apps/ios/ios/Podfile", "platform :ios, '15.0'\n");
+        t.put("apps/swift/Demo.xcodeproj/project.pbxproj", "// pbx\n");
+        t.put("apps/android/app/src/main/AndroidManifest.xml", "<manifest/>\n");
+        t.put("apps/documented/PRODUCT.md", "# P\n");
+        for app in ["apps/flutter", "apps/ios", "apps/swift", "apps/android", "apps/documented"] {
+            assert!(has_ui_signal(&at(app)), "{}", app);
+        }
+        // No tree walk: styles nested below the first level do not count.
+        t.put("packages/deep/src/a/b/theme.css", ":root { --a: #fff; --b: #000; --c: #f00; }\n");
+        assert!(!has_ui_signal(&at("packages/deep")));
         assert!(!has_ui_signal(&at("apps/api")));
         assert!(!has_ui_signal(&at("packages/tsconfig")));
         assert!(!has_ui_signal(&at("packages/eslint-config")));
@@ -1452,6 +1499,18 @@ mod ui_target_tests {
         assert_eq!((sel.target_candidates.len(), sel.skipped_non_ui), (4, 4));
         let all = resolve_workspace_selection(&t.root(), &TargetOptions::default(), &env()).unwrap();
         assert_eq!((all.target_candidates.len(), all.skipped_non_ui), (8, 0));
+    }
+
+    #[test]
+    fn native_app_beside_a_web_app_stays_listed() {
+        let t = Tmp::new("native");
+        monorepo(&t);
+        t.put("apps/mobile/pubspec.yaml", "name: mobile\n");
+        t.put("apps/mobile/lib/main.dart", "void main() {}\n");
+        let (cands, skipped) = discover_ui_target_candidates(&t.root(), &env());
+        assert!(paths(&cands).contains(&"apps/mobile"));
+        assert!(paths(&cands).contains(&"apps/web"));
+        assert_eq!(skipped, 4);
     }
 
     #[test]

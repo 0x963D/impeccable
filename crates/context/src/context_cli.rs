@@ -397,7 +397,7 @@ fn build_target_selection_directive(sel: &TargetSelection) -> String {
     }
     let skipped = if sel.skipped_non_ui > 0 {
         format!(
-            " {} workspace{} without a UI signal (no UI framework dependency, index.html, or styled source) {} not listed; reach one with `--target <path>` only when the user names it.",
+            " {} workspace{} without a UI signal (no UI framework dependency, HTML entry, native app marker, or UI source file) {} not listed; reach one with `--target <path>` only when the user names it.",
             sel.skipped_non_ui,
             if sel.skipped_non_ui == 1 { "" } else { "s" },
             if sel.skipped_non_ui == 1 { "is" } else { "are" }
