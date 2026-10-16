@@ -1198,12 +1198,7 @@ impl<'a, 's> Scope<'a, 's> {
             let (chunks, _) = brace_scope_statements(source, e.i, m.index);
             chunks.iter().any(|(statements, _)| declares_radius(statements))
         };
-        Some(
-            own_scope
-                || index
-                    .declaration_hosts(pos)
-                    .is_some_and(|hosts| index.hosts_declare_radius(&hosts)),
-        )
+        Some(own_scope || index.declaration_declares_radius(pos))
     }
 }
 

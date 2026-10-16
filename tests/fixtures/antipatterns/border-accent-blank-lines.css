@@ -36,6 +36,15 @@
   .media-card { border-radius: 12px; }
 }
 
+/* ── FLAG: a pseudo-element's own rules, split across blank lines ── */
+.split-tab::after { border-top: 9px solid #d0342c; }
+
+
+
+
+
+.split-tab::after { border-radius: 12px; }
+
 /* ── PASS: the radius is on another selector, on the same line ── */
 .tabs-line { border-bottom: 7px solid #d0342c; } .zoom-line { border-radius: 12px; }
 
@@ -47,3 +56,17 @@
 
 
 .zoom-gap { border-radius: 12px; }
+
+/* ── PASS: a custom property only names a value ── */
+.token-card { --token-card-radius: 12px; border-bottom: 10px solid #d0342c; }
+
+/* ── PASS: a mixin might carry a radius, but does not assert one ── */
+.apply-card { @apply rounded-lg; border-bottom: 11px solid #d0342c; }
+
+/* ── PASS: the radius rounds a descendant, not the accented box ── */
+.list-card { border-bottom: 12px solid #d0342c; }
+.list-card .title { border-radius: 12px; }
+
+/* ── PASS: the radius rounds a pseudo-element, another box ── */
+.pseudo-card { border-bottom: 13px solid #d0342c; }
+.pseudo-card::after { border-radius: 12px; }

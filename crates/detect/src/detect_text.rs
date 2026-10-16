@@ -2307,6 +2307,10 @@ function Thumb({ url }: { url?: string }) {
         let tab = ".tab::after { border-top: 4px solid #d0342c; border-radius: 4px 4px 0 0; }";
         assert_eq!(accents(&format!("{tab}\n")), 1);
         assert_eq!(accents(&format!("{accent}{gap}.card::after {{ border-radius: 8px; }}\n")), 0);
+        let split = format!(
+            ".tab::after {{ border-top: 4px solid #d0342c; }}{gap}.tab::after {{ border-radius: 8px; }}\n"
+        );
+        assert_eq!(accents(&split), 1);
         // A component file's `<style>` block reads the same way.
         let vue = |rules: &str| {
             format!("<template><div class=\"tabs\" /></template>\n<style>\n{rules}\n</style>\n")
