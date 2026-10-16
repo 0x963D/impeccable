@@ -4,8 +4,8 @@
 //! `crate::js_ext_a::utf16_index`) and/or a `selector`.
 
 use crate::checks::rules::{
-    extract_shadow_lengths, find_shadow_color, glow_is_perceptible, DeclaredCorners, ANY, B, D,
-    NOMINAL_CARD_WIDTH_PX,
+    extract_shadow_lengths, find_shadow_color, glow_is_perceptible, is_radius_property,
+    DeclaredCorners, ANY, B, D, NOMINAL_CARD_WIDTH_PX,
 };
 use crate::color::{
     color_to_hex, has_chroma, parse_any_color, relative_luminance, split_top_level_commas, Rgba,
@@ -1534,6 +1534,20 @@ impl<'a> CssHostIndex<'a> {
         corners
     }
 
+    /// Whether a rule [`tied_rules`](Self::tied_rules) ties to `hosts` sets a
+    /// radius, the stylesheet reading side-tab takes: `.card` rules and
+    /// grouped selectors count, a compound that adds to the host
+    /// (`.card.is-active`) does not. A statement that might bring a radius in
+    /// unseen (a mixin, `@apply`) is not one.
+    pub fn hosts_declare_radius(&self, hosts: &[String]) -> bool {
+        self.tied_rules(hosts).iter().any(|id| {
+            self.rules[*id]
+                .decls
+                .iter()
+                .any(|d| matches!(d, RadiusDecl::Set(prop, _) if is_radius_property(prop)))
+        })
+    }
+
     /// The radius rules naming one of `hosts`, in source order: what
     /// [`corners_for_hosts`](Self::corners_for_hosts) applies.
     fn tied_rules(&self, hosts: &[String]) -> Vec<usize> {
@@ -1623,22 +1637,30 @@ impl<'a> CssHostIndex<'a> {
         side: usize,
         sheet: &DeclaredCorners,
     ) -> bool {
+        self.hosts_known_square(self.declaration_hosts(pos), side, sheet)
+    }
+
+    /// The host selectors of the box the declaration at `pos` (a byte offset
+    /// into the text the index was built on) styles: the innermost block
+    /// around it, or `&` at the top level of a CSS-in-JS template. `None`
+    /// when the box cannot be named: the declaration or an enclosing selector
+    /// is interpolated.
+    pub fn declaration_hosts(&self, pos: usize) -> Option<Vec<String>> {
         let pos = self.content_offset(pos);
         if self
             .interpolations
             .iter()
             .any(|(start, end)| *start <= pos && pos <= *end)
         {
-            return false;
+            return None;
         }
         let before = self.opens.partition_point(|open| *open < pos);
         let block = (0..before).rev().find(|b| self.closes[*b] >= pos);
-        let hosts = match block {
+        match block {
             None => Some(vec!["&".to_string()]),
             Some(b) if self.hosts_unknown[b] => None,
             Some(b) => Some(self.host_forms(&self.hosts[b])),
-        };
-        self.hosts_known_square(hosts, side, sheet)
+        }
     }
 
     /// [`side_stripe_on_rounded_host`](Self::side_stripe_on_rounded_host)'s

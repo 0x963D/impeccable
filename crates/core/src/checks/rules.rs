@@ -81,6 +81,13 @@ impl Default for DeclaredCorners {
     }
 }
 
+/// Whether a declaration's property sets a radius: its lowercase name ends in
+/// `radius`. Corner longhands round the box, so they count; a custom property
+/// (`--btn-radius`) only names a value and does not.
+pub fn is_radius_property(prop: &str) -> bool {
+    !prop.starts_with("--") && prop.to_ascii_lowercase().ends_with("radius")
+}
+
 impl DeclaredCorners {
     /// Every corner at once, the way the `border-radius` shorthand sets them.
     pub fn set_all(&mut self, corners: Option<Corners>) {
