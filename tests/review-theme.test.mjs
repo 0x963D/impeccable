@@ -104,6 +104,27 @@ async function readableText(page, selector, backgroundSelector) {
   assert.ok(ratio >= 4.5, `${selector} contrast ${ratio.toFixed(2)} must reach 4.5:1`);
 }
 
+async function readablePressedButton(page, selector, name) {
+  const button = page.locator(selector);
+  const settle = () => button.evaluate(el => Promise.all(el.getAnimations().map(animation => animation.finished)));
+  await settle();
+  await readableText(page, selector, selector);
+  await button.hover();
+  await settle();
+  await readableText(page, selector, selector);
+  await page.mouse.down();
+  try {
+    assert.ok(await button.evaluate(el => el.matches(':active')), `${selector} is held down`);
+    await settle();
+    await screenshot(page, `${name}-pressed`);
+    await readableText(page, selector, selector);
+  } finally {
+    // Release outside the button so inspecting its pressed state does not submit a decision.
+    await page.mouse.move(0, 0);
+    await page.mouse.up();
+  }
+}
+
 async function waitForExit(pid) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -235,7 +256,14 @@ for (const kind of ['component', 'plan', 'page']) {
       child = server.child;
       await page.goto(server.url);
       const prefix = kind;
-      if (plan) await page.getByRole('button', { name: /Start/ }).click();
+      if (plan) {
+        for (const colorScheme of ['light', 'dark']) {
+          await page.emulateMedia({ colorScheme });
+          await readablePressedButton(page, '#start', `plan-${colorScheme}-start`);
+        }
+        await page.emulateMedia({ colorScheme: 'light' });
+        await page.getByRole('button', { name: /Start/ }).click();
+      }
       const shell = plan ? '.rv' : '.review';
       const art = page.locator(plan ? '.frame > .pic.gen' : '.output.crop-stage');
       await art.waitFor();
@@ -251,6 +279,11 @@ for (const kind of ['component', 'plan', 'page']) {
       await readableText(page, plan ? '.bar-name' : kind === 'page' ? '.review h1' : '.material strong', shell);
       await samePixels(page, lightArt, await pixels(page, art));
       if (locator) await samePixels(page, lightLocator, await pixels(page, locator));
+      const approval = plan ? '#decide-yes' : '#approve';
+      for (const colorScheme of ['light', 'dark']) {
+        await page.emulateMedia({ colorScheme });
+        await readablePressedButton(page, approval, `${prefix}-${colorScheme}-approval`);
+      }
       if (plan) {
         await page.locator('#backdrop').click();
         const onLight = await pixels(page, art);
@@ -272,6 +305,8 @@ for (const kind of ['component', 'plan', 'page']) {
       }
       await page.setViewportSize({ width: 390, height: 844 });
       await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth, null, { timeout: 5000 });
+      if (kind === 'component') await page.locator('#show-component').click();
+      await readablePressedButton(page, approval, `${prefix}-dark-mobile-approval`);
       await screenshot(page, `${prefix}-dark-mobile`);
       await page.route('**/packet', route => route.fulfill({ status: 500, body: 'Unavailable' }));
       await page.reload();

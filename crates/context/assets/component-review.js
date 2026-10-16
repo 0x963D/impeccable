@@ -1086,6 +1086,11 @@ img, iframe { color-scheme: light; }
     --ks-cap-press: inset 0 1px 2px oklch(0% 0 0 / 0.4);
     --ks-track-recess: inset 0 1px 3px oklch(0% 0 0 / 0.4);
   }
+
+  .ks-button.ks-button-primary:active {
+    background: var(--ks-text-muted);
+    border-color: var(--ks-text-muted);
+  }
 }
 `;var Ei=(i)=>i.replace(/^:root\s*\{/gm,":root, :host {"),ze=Ei(Mi)+`
 `+Ei(Ti)+`
