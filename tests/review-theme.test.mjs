@@ -172,6 +172,21 @@ test('picker follows live OS changes while comp pixels and their background stay
     assert.equal(dark.scheme, 'dark');
     await readableText(page, '.question', 'body');
     await readableText(page, '.card[data-id="sample"] .face.front h2', '.card[data-id="sample"] .face.front');
+    await readableText(page, '.card[data-id="sample"] button.choose', '.card[data-id="sample"] button.choose');
+    // The primary action keeps its shape on the dark card, not one fill step off it.
+    const fills = await page.locator('.card[data-id="sample"] .face.front').evaluate(face => {
+      const ctx = document.createElement('canvas').getContext('2d');
+      const lum = color => {
+        ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1);
+        return [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3)
+          .map(v => v / 255).map(s => s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4)
+          .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+      };
+      const a = lum(getComputedStyle(face.querySelector('button.choose')).backgroundColor);
+      const b = lum(getComputedStyle(face).backgroundColor);
+      return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    });
+    assert.ok(fills >= 3, `dark primary button fill contrast ${fills.toFixed(2)} against its card must reach 3:1`);
     await samePixels(page, lightArt, await pixels(page, art));
     await samePixels(page, lightSketch, await pixels(page, sketch, 80));
     await art.click();
