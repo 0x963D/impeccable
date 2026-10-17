@@ -125,6 +125,15 @@ async function readablePressedButton(page, selector, name) {
   }
 }
 
+// Switch the emulated scheme and wait for the colour transitions it starts:
+// a control's text can flip at once while its fill is still fading, and a
+// contrast read mid-fade measures neither scheme. Only transitions count:
+// a pending placeholder's looping animation never finishes.
+async function setScheme(page, colorScheme) {
+  await page.emulateMedia({ colorScheme });
+  await page.waitForFunction(() => document.getAnimations().every(a => !(a instanceof CSSTransition) || a.playState !== 'running'), null, { timeout: 5000 });
+}
+
 async function waitForExit(pid) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -165,7 +174,7 @@ test('picker follows live OS changes while comp pixels and their background stay
     const lightArt = await pixels(page, art);
     const lightSketch = await pixels(page, sketch, 80);
     await screenshot(page, 'picker-light-desktop');
-    await page.emulateMedia({ colorScheme: 'dark' });
+    await setScheme(page, 'dark');
     const dark = await appearance(page, 'body');
     await screenshot(page, 'picker-dark-desktop');
     assert.notEqual(dark.background, light.background);
@@ -194,12 +203,12 @@ test('picker follows live OS changes while comp pixels and their background stay
     const darkLightbox = await appearance(page, '#lightbox');
     const lightboxArt = await pixels(page, page.locator('#lightbox img'));
     await screenshot(page, 'picker-dark-lightbox');
-    await page.emulateMedia({ colorScheme: 'light' });
+    await setScheme(page, 'light');
     assert.notEqual((await appearance(page, '#lightbox')).background, darkLightbox.background);
     await samePixels(page, lightboxArt, await pixels(page, page.locator('#lightbox img')));
     await page.keyboard.press('Escape');
     await page.locator('#lightbox[hidden]').waitFor({ state: 'attached' });
-    await page.emulateMedia({ colorScheme: 'dark' });
+    await setScheme(page, 'dark');
     await page.locator('.bp-opt[data-bp="comp"]').click();
     await page.getByRole('dialog').waitFor();
     assert.equal((await appearance(page, '.bp-confirm-panel')).scheme, 'dark');
@@ -273,10 +282,10 @@ for (const kind of ['component', 'plan', 'page']) {
       const prefix = kind;
       if (plan) {
         for (const colorScheme of ['light', 'dark']) {
-          await page.emulateMedia({ colorScheme });
+          await setScheme(page, colorScheme);
           await readablePressedButton(page, '#start', `plan-${colorScheme}-start`);
         }
-        await page.emulateMedia({ colorScheme: 'light' });
+        await setScheme(page, 'light');
         await page.getByRole('button', { name: /Start/ }).click();
       }
       const shell = plan ? '.rv' : '.review';
@@ -288,7 +297,7 @@ for (const kind of ['component', 'plan', 'page']) {
       const locator = plan ? page.locator('.locator-map') : null;
       const lightLocator = locator ? await pixels(page, locator) : null;
       await screenshot(page, `${prefix}-light-desktop`);
-      await page.emulateMedia({ colorScheme: 'dark' });
+      await setScheme(page, 'dark');
       await screenshot(page, `${prefix}-dark-desktop`);
       assert.notEqual((await appearance(page, shell)).background, light.background);
       await readableText(page, plan ? '.bar-name' : kind === 'page' ? '.review h1' : '.material strong', shell);
@@ -296,22 +305,22 @@ for (const kind of ['component', 'plan', 'page']) {
       if (locator) await samePixels(page, lightLocator, await pixels(page, locator));
       const approval = plan ? '#decide-yes' : '#approve';
       for (const colorScheme of ['light', 'dark']) {
-        await page.emulateMedia({ colorScheme });
+        await setScheme(page, colorScheme);
         await readablePressedButton(page, approval, `${prefix}-${colorScheme}-approval`);
       }
       if (plan) {
         await page.locator('#backdrop').click();
         const onLight = await pixels(page, art);
-        await page.emulateMedia({ colorScheme: 'light' });
+        await setScheme(page, 'light');
         await samePixels(page, onLight, await pixels(page, art));
-        await page.emulateMedia({ colorScheme: 'dark' });
+        await setScheme(page, 'dark');
       } else {
         if (kind === 'component') {
           await page.getByRole('button', { name: 'Page color background' }).click();
           const onPage = await pixels(page, art);
-          await page.emulateMedia({ colorScheme: 'light' });
+          await setScheme(page, 'light');
           await samePixels(page, onPage, await pixels(page, art));
-          await page.emulateMedia({ colorScheme: 'dark' });
+          await setScheme(page, 'dark');
         }
         await page.getByRole('button', { name: 'Enlarge comparison' }).click();
         await page.getByRole('dialog').waitFor();
@@ -368,7 +377,7 @@ test('grouped previews keep their original mattes and approved dimming in either
         const art = page.locator('.instance-produced').first();
         if (hovered) await art.hover();
         else await page.mouse.move(0, 0);
-        await page.emulateMedia({ colorScheme: 'light' });
+        await setScheme(page, 'light');
         const light = await pixels(page, art);
         const reference = page.locator('.instance-reference').first();
         const lightReference = await pixels(page, reference);
@@ -376,7 +385,7 @@ test('grouped previews keep their original mattes and approved dimming in either
           if (approved) assert.notDeepEqual(light, pendingPixels, 'approved previews retain their original dimming');
           else pendingPixels = light;
         }
-        await page.emulateMedia({ colorScheme: 'dark' });
+        await setScheme(page, 'dark');
         await samePixels(page, light, await pixels(page, art));
         await samePixels(page, lightReference, await pixels(page, reference));
         await screenshot(page, `group-${approved ? 'approved' : 'pending'}-${hovered ? 'hover' : 'normal'}-dark`);
